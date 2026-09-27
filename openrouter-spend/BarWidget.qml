@@ -51,14 +51,8 @@ BarWidget {
     return isFinite(v) ? v : fallback
   }
 
-  // ---- data lifecycle: watch state file on disk, re-read immediately on
-  //      any change (including external fetches). Also poll every 5 min as a
-  //      backup (the external minutely cron is the primary trigger).
-  FileSystemWatcher {
-    paths: [root.stateFile]
-    onPathChanged: root.reload()
-  }
-
+  // ---- data lifecycle: re-read on popup open (always fresh when you look)
+  //      and on init. Polls every 5 min to self-correct.
   Process {
     id: readProc
     command: [root.pythonPath, root.helperPath, "read", "openrouter-spend.json"]
@@ -116,6 +110,7 @@ BarWidget {
   readonly property bool panelHovered: popup.containsMouse === true
 
   function openPanel() {
+    root.reload()
     closeTimer.stop()
     root.popupOpen = true
   }
