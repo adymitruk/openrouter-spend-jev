@@ -10,7 +10,6 @@ function parseSpend(raw) {
       month: String(data.month || ""),
       monthTotal: finiteNumber(data.month_total),
       last24h: finiteNumber(data.last24h),
-      lastHourTotal: finiteNumber(data.lastHourTotal),
       generatedAt: finiteNumber(data.generated_at),
       days: Array.isArray(data.days) ? data.days : [],
       models: Array.isArray(data.models) ? data.models : [],
@@ -56,12 +55,16 @@ function barLabel(value) {
 }
 
 // Pill label. Shows "$20.00 ($1.00, $0.15)" — month total, last 24h, last hour.
-// The bracketed figures let you see recent activity at a glance.
+// lastHour is the lastHour array from state (12 x 5-min bars); lastHourTotal
+// is computed by summing the bar totals.
 function pillLabel(monthTotal, last24, lastHour) {
   var main = barLabel(monthTotal)
   var parts = []
   if (finiteNumber(last24) > 0) parts.push(compactMoney(last24))
-  if (finiteNumber(lastHour) > 0) parts.push(compactMoney(lastHour))
+  var hourTotal = 0
+  var bars = Array.isArray(lastHour) ? lastHour : []
+  for (var i = 0; i < bars.length; i++) hourTotal += finiteNumber(bars[i] && bars[i].total)
+  if (hourTotal > 0) parts.push(compactMoney(hourTotal))
   if (parts.length === 0) return main
   return main + " (" + parts.join(", ") + ")"
 }

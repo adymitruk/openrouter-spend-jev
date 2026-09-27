@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """OpenRouter spend fetcher for the omarchy bar widget.
 
-Owns the only untrusted boundary (the OpenRouter HTTPS API) and the only disk
-state (the aggregated spend JSON). The bar widget is pure display: it asks this
-helper to `read` the aggregate it already wrote.
-
-State and the management key live in the private omarchy settings dir
-(~/.local/state/omarchy/settings/, mode 0700). The key is never echoed, never
-put on a command line, and never written by the widget.
+State is a directory tree:
+  settings/openrouter-spend/<YYYY-MM-DD>/<HH:MM>/<canonical-model-slug>.json
+Each file contains {"cost": <float>} for one model's spend in one 5-min slot.
 
 Commands:
-  fetch     Poll OpenRouter /generations for the current calendar month and
-            write openrouter-spend.json (month total, spend per day, spend per
-            model, most expensive first).
-  read <n>  Print a validated state file (openrouter-spend.json).
+  fetch     Poll OpenRouter analytics, write per-slot per-model files.
+  read      Scan the tree, print aggregated JSON to stdout.
+  write-key <name> <value>   Write a key file.
 """
 
 import datetime
@@ -25,14 +20,9 @@ import subprocess
 import sys
 
 MAX_RESPONSE = 256 * 1024
-MAX_STATE = 128 * 1024
-STATE_NAMES = {"openrouter-spend.json"}
 KEY_NAMES = {"openrouter-key"}
+STATE_DIR_NAME = "openrouter-spend"
 
-
-# ---- Secure state-directory access (same hardened pattern as the weather
-#      widget's helper: walk HOME descriptor-first, never follow user-mutable
-#      symlinks, keep the leaf private). -------------------------------------
 
 def _is_dir(mode):
     return (mode & 0o170000) == 0o040000
@@ -87,6 +77,25 @@ def settings_fd():
         raise
 
 
+def state_dir_fd():
+    fd = settings_fd()
+    try:
+        try:
+            sfd = os.open(STATE_DIR_NAME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        except FileNotFoundError:
+            os.mkdir(STATE_DIR_NAME, 0o700, dir_fd=fd)
+            sfd = os.open(STATE_DIR_NAME, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        os.fchmod(sfd, 0o700)
+        info = os.fstat(sfd)
+        if not _is_dir(info.st_mode) or info.st_uid != os.getuid():
+            os.close(sfd)
+            raise OSError("unsafe state dir")
+        return sfd, fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
 def read_key():
     fd = settings_fd()
     try:
@@ -107,7 +116,6 @@ def read_key():
 
 
 def write_key(name, value):
-    """Write a named key file in the settings dir (e.g. openrouter-key)."""
     if name not in KEY_NAMES:
         return
     fd = settings_fd()
@@ -145,79 +153,7 @@ def write_key(name, value):
         os.close(fd)
 
 
-def read_state(name):
-    if name not in STATE_NAMES:
-        raise ValueError("invalid state name")
-    fd = settings_fd()
-    try:
-        try:
-            h = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
-        except FileNotFoundError:
-            return
-        try:
-            info = os.fstat(h)
-            if info.st_mode & 0o170000 != 0o100000 or info.st_uid != os.getuid():
-                raise OSError("unsafe state file")
-            if info.st_size > MAX_STATE:
-                raise OSError("state too large")
-            data = os.read(h, MAX_STATE + 1)
-        finally:
-            os.close(h)
-    finally:
-        os.close(fd)
-    if len(data) > MAX_STATE:
-        raise OSError("state too large")
-    sys.stdout.buffer.write(data)
-
-
-def write_state(name, data):
-    if name not in STATE_NAMES:
-        raise ValueError("invalid state name")
-    if len(data) > MAX_STATE:
-        raise OSError("state too large")
-    fd = settings_fd()
-    f = -1
-    tmp = None
-    try:
-        try:
-            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            if info.st_mode & 0o170000 != 0o100000 or info.st_uid != os.getuid():
-                raise OSError("unsafe target")
-        except FileNotFoundError:
-            pass
-        for _ in range(100):
-            tmp = "." + name + "." + secrets.token_hex(16)
-            try:
-                f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-                            | os.O_CLOEXEC, 0o600, dir_fd=fd)
-                break
-            except FileExistsError:
-                tmp = None
-        else:
-            raise OSError("no temp slot")
-        os.fchmod(f, 0o600)
-        off = 0
-        while off < len(data):
-            off += os.write(f, data[off:])
-        os.fsync(f)
-        os.replace(tmp, name, src_dir_fd=fd, dst_dir_fd=fd)
-        tmp = None
-        os.close(f)
-        f = -1
-        os.fsync(fd)
-    finally:
-        if f != -1:
-            os.close(f)
-        if tmp:
-            try:
-                os.unlink(tmp, dir_fd=fd)
-            except OSError:
-                pass
-        os.close(fd)
-
-
 def _post(url, payload):
-    """POST JSON with the key; return (status, data) or (None, None) on failure."""
     key = read_key()
     if not key:
         return None, None
@@ -236,7 +172,6 @@ def _post(url, payload):
 
 
 def _analytics(payload):
-    """Run one analytics query against the management key; return its rows."""
     status, body = _post("https://openrouter.ai/api/v1/analytics/query", payload)
     if not body:
         return None
@@ -254,7 +189,6 @@ def _analytics(payload):
 
 
 def _row_value(row, keys):
-    """First present value among candidate keys in a row."""
     if not row or not isinstance(row, dict):
         return None
     for k in keys:
@@ -271,9 +205,6 @@ def _as_float(value):
 
 
 def _canonical_model(slug):
-    """Collapse release-date variants into one canonical name.
-    'deepseek/deepseek-v4-flash-20260731' -> 'deepseek/deepseek-v4-flash'
-    """
     parts = str(slug or "").rsplit("/", 1)
     if len(parts) == 2:
         name = re.sub(r"-\d{8}$", "", parts[1])
@@ -281,266 +212,300 @@ def _canonical_model(slug):
     return re.sub(r"-\d{8}$", "", str(slug or ""))
 
 
-def _merge_hour_models(minutes):
-    """Merge per-minute model segments into 5-minute aggregates."""
-    merged = {}
-    for m in minutes:
-        for seg in m.get("models", []):
-            model = seg["model"]
-            merged[model] = merged.get(model, 0.0) + seg["total"]
-    segs = [{"model": m, "total": round(v, 6)} for m, v in merged.items() if v > 0]
-    segs.sort(key=lambda x: x["total"], reverse=True)
-    return segs
-
-
 def _parse_utc_dt(s):
-    """Parse a UTC ISO timestamp string into an aware datetime.
-
-    OpenRouter's minute-granularity endpoint returns timestamps like
-    '2026-09-27 18:20:00' (space separator, no tz marker). Hour and day
-    granularity returns ISO format with T and possibly Z.
-    Both are UTC — always force +00:00 when no tzinfo is present.
-    """
     s = str(s).strip().replace("T", " ").replace("Z", "")
-    # fromisoformat accepts the space-separated UTC form — add +00:00 if naive
     dt = datetime.datetime.fromisoformat(s)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=datetime.timezone.utc)
     return dt
 
 
+def _safe_model_filename(model):
+    s = model.replace("/", "_").replace(" ", "_")
+    s = re.sub(r"[^a-zA-Z0-9_.-]", "_", s)
+    if not s:
+        s = "_"
+    return s + ".json"
+
+
+def write_slot_file(sfd, date_str, slot_key, model, cost):
+    try:
+        dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sfd)
+    except FileNotFoundError:
+        os.mkdir(date_str, 0o700, dir_fd=sfd)
+        dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sfd)
+    info = os.fstat(dfd)
+    if not _is_dir(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        os.close(dfd)
+        raise OSError("unsafe date dir")
+    try:
+        try:
+            slotfd = os.open(slot_key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+        except FileNotFoundError:
+            os.mkdir(slot_key, 0o700, dir_fd=dfd)
+            slotfd = os.open(slot_key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+        info2 = os.fstat(slotfd)
+        if not _is_dir(info2.st_mode) or info2.st_uid != os.getuid() or info2.st_mode & 0o022:
+            os.close(slotfd)
+            raise OSError("unsafe slot dir")
+        fname = _safe_model_filename(model)
+        f = -1
+        tmp = None
+        try:
+            for _ in range(100):
+                tmp = "." + fname + "." + secrets.token_hex(16)
+                try:
+                    f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                                | os.O_CLOEXEC, 0o600, dir_fd=slotfd)
+                    break
+                except FileExistsError:
+                    tmp = None
+            else:
+                raise OSError("no temp slot")
+            data = json.dumps({"cost": round(cost, 6)}).encode("utf-8")
+            off = 0
+            while off < len(data):
+                off += os.write(f, data[off:])
+            os.fsync(f)
+            os.replace(tmp, fname, src_dir_fd=slotfd, dst_dir_fd=slotfd)
+            tmp = None
+            os.close(f)
+            f = -1
+        finally:
+            if f != -1:
+                os.close(f)
+            if tmp:
+                try:
+                    os.unlink(tmp, dir_fd=slotfd)
+                except OSError:
+                    pass
+    finally:
+        os.close(slotfd)
+        os.close(dfd)
+
+
 def fetch():
-    """Aggregate spend bucketed into local-timezone 5-minute windows."""
     now_aware = datetime.datetime.now().astimezone()
     local_tz = now_aware.tzinfo
     now_local = now_aware
     today_local = now_local.date()
-    month_start_local = today_local.replace(day=1)
-    next_month_local = (month_start_local.replace(day=28)
-                        + datetime.timedelta(days=4)).replace(day=1)
 
     def local_midnight_utc(d):
         naive = datetime.datetime.combine(d, datetime.time.min)
         return naive.replace(tzinfo=local_tz).astimezone(datetime.timezone.utc)
 
-    month_start_utc = local_midnight_utc(month_start_local)
-    next_month_utc = local_midnight_utc(next_month_local)
-    time_range = {
-        "start": month_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "end": next_month_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
+    today_start_utc = local_midnight_utc(today_local)
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
 
-    # --- Days: hourly buckets from the API, grouped into local calendar days
-    #      by converting each UTC hour to local time.
+    sfd, parent_fd = state_dir_fd()
+    try:
+        def fetch_minute_chunk(chunk_start, chunk_end):
+            rows = _analytics({
+                "metrics": ["total_usage"],
+                "dimensions": ["model"],
+                "granularity": "minute",
+                "time_range": {
+                    "start": chunk_start.strftime("%Y-%m-%dT%H:%M:00Z"),
+                    "end": chunk_end.strftime("%Y-%m-%dT%H:%M:00Z"),
+                },
+                "limit": 5000,
+            })
+            if rows is None:
+                return
+            grouped = {}
+            for row in rows:
+                ts = _row_value(row, ["date__minute", "created_at__minute"])
+                raw_model = _row_value(row, ["model", "model_name"])
+                if not ts or not raw_model:
+                    continue
+                local_dt = _parse_utc_dt(ts).astimezone(local_tz)
+                date_str = local_dt.strftime("%Y-%m-%d")
+                slot_m = (local_dt.minute // 5) * 5
+                slot_key = local_dt.strftime("%H") + f":{slot_m:02d}"
+                can = _canonical_model(raw_model)
+                key = (date_str, slot_key, can)
+                grouped[key] = grouped.get(key, 0.0) + _as_float(_row_value(row, ["total_usage"]))
+            for (date_str, slot_key, model), cost in grouped.items():
+                try:
+                    write_slot_file(sfd, date_str, slot_key, model, cost)
+                except OSError:
+                    pass
+
+        chunk = today_start_utc
+        while chunk < now_utc:
+            chunk_end = min(chunk + datetime.timedelta(hours=3), now_utc)
+            fetch_minute_chunk(chunk, chunk_end)
+            chunk = chunk_end
+    finally:
+        os.close(sfd)
+        os.close(parent_fd)
+    return 0
+
+
+def read():
+    sfd, parent_fd = state_dir_fd()
+    now_local = datetime.datetime.now().astimezone()
+    local_tz = now_local.tzinfo
+    today_local = now_local.date()
+    month_start_local = today_local.replace(day=1)
+
+    records = []
+    try:
+        for entry in os.listdir(sfd):
+            if len(entry) != 10 or entry[4] != "-" or entry[7] != "-":
+                continue
+            date_str = entry
+            try:
+                dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sfd)
+            except OSError:
+                continue
+            try:
+                for slot_entry in os.listdir(dfd):
+                    if len(slot_entry) != 5 or slot_entry[2] != ":":
+                        continue
+                    slot_key = slot_entry
+                    try:
+                        slotfd = os.open(slot_key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+                    except OSError:
+                        continue
+                    try:
+                        for model_file in os.listdir(slotfd):
+                            if not model_file.endswith(".json"):
+                                continue
+                            try:
+                                mf = os.open(model_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=slotfd)
+                            except OSError:
+                                continue
+                            try:
+                                raw = os.read(mf, 4096)
+                                info = os.fstat(mf)
+                                mtime = info.st_mtime if info else 0
+                            finally:
+                                os.close(mf)
+                            try:
+                                obj = json.loads(raw.decode("utf-8", "replace"))
+                                cost = _as_float(obj.get("cost", 0))
+                            except (ValueError, AttributeError):
+                                cost = 0.0
+                            slug = model_file[:-5].replace("_", "/")
+                            records.append((date_str, slot_key, slug, cost, mtime))
+                    finally:
+                        os.close(slotfd)
+            finally:
+                os.close(dfd)
+    finally:
+        os.close(sfd)
+        os.close(parent_fd)
+
+    if not records:
+        empty = {
+            "month": month_start_local.strftime("%Y-%m"),
+            "month_total": 0.0,
+            "last24h": 0.0,
+            "generated_at": int(now_local.timestamp()),
+            "days": [],
+            "models": [],
+            "series": [],
+            "lastHour": [],
+            "todaySlots": [],
+        }
+        sys.stdout.write(json.dumps(empty))
+        return
+
+    # per day
     days_by_date = {}
-    hour_rows = _analytics({
-        "metrics": ["total_usage"],
-        "granularity": "hour",
-        "time_range": time_range,
-        "limit": 1000,
-    })
-    if hour_rows is not None:
-        for row in hour_rows:
-            ts = _row_value(row, ["date__hour", "created_at__hour", "created_at"])
-            if not ts:
-                continue
-            local_dt = _parse_utc_dt(ts).astimezone(local_tz)
-            local_date_str = local_dt.strftime("%Y-%m-%d")
-            days_by_date[local_date_str] = (
-                days_by_date.get(local_date_str, 0.0)
-                + _as_float(_row_value(row, ["total_usage"]))
-            )
-    days = [{"date": d, "total": round(t, 6)}
-            for d, t in sorted(days_by_date.items(), reverse=True)]
-    month_total = round(sum(d["total"] for d in days), 6) if days else 0.0
-
-    # --- Spend per model for the month, most expensive first.
-    model_totals = {}
-    model_rows = _analytics({
-        "metrics": ["total_usage"],
-        "dimensions": ["model"],
-        "order_by": {"field": "total_usage", "direction": "desc"},
-        "time_range": time_range,
-        "limit": 1000,
-    })
-    if model_rows is not None:
-        for row in model_rows:
-            raw_model = _row_value(row, ["model", "model_name"])
-            if not raw_model:
-                continue
-            model_totals[_canonical_model(raw_model)] = (
-                model_totals.get(_canonical_model(raw_model), 0.0)
-                + _as_float(_row_value(row, ["total_usage"]))
-            )
-    models = [{"model": m, "total": round(v, 6)}
-              for m, v in model_totals.items() if v > 0]
+    model_totals_all = {}
+    for date_str, slot_key, model, cost, mtime in records:
+        days_by_date[date_str] = days_by_date.get(date_str, 0.0) + cost
+        model_totals_all[model] = model_totals_all.get(model, 0.0) + cost
+    days = [{"date": d, "total": round(t, 6)} for d, t in sorted(days_by_date.items(), reverse=True)]
+    month_total = round(sum(d["total"] for d in days), 6)
+    models = [{"model": m, "total": round(t, 6)} for m, t in model_totals_all.items() if t > 0]
     models.sort(key=lambda x: x["total"], reverse=True)
 
-    # --- 30-day series: per-model, per-local-day, from hourly API data.
+    # 30-day series
     start30_local = today_local - datetime.timedelta(days=29)
-    start30_utc = local_midnight_utc(start30_local)
-    end_utc = local_midnight_utc(today_local + datetime.timedelta(days=1))
-
-    series_rows = _analytics({
-        "metrics": ["total_usage"],
-        "dimensions": ["model"],
-        "granularity": "hour",
-        "time_range": {
-            "start": start30_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "end": end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        },
-        "limit": 10000,
-    })
-    bydate = {}
-    if series_rows is not None:
-        for row in series_rows:
-            ts = _row_value(row, ["date__hour", "created_at__hour", "created_at"])
-            raw_model = _row_value(row, ["model", "model_name"])
-            if not ts or not raw_model:
-                continue
-            local_date = _parse_utc_dt(ts).astimezone(local_tz).strftime("%Y-%m-%d")
-            can = _canonical_model(raw_model)
-            rec = bydate.setdefault(local_date, {})
-            rec[can] = rec.get(can, 0.0) + _as_float(_row_value(row, ["total_usage"]))
+    series_bydate = {}
+    for date_str, slot_key, model, cost, mtime in records:
+        try:
+            d = datetime.date.fromisoformat(date_str)
+        except ValueError:
+            continue
+        if d < start30_local or d > today_local:
+            continue
+        rec = series_bydate.setdefault(date_str, {})
+        rec[model] = rec.get(model, 0.0) + cost
     series = []
     for i in range(30):
         d = start30_local + datetime.timedelta(days=i)
         ds = d.isoformat()
-        day_models = bydate.get(ds, {})
-        segs = [{"model": m, "total": round(v, 6)}
-                for m, v in day_models.items() if v > 0]
+        day_models = series_bydate.get(ds, {})
+        segs = [{"model": m, "total": round(v, 6)} for m, v in day_models.items() if v > 0]
         segs.sort(key=lambda x: x["total"], reverse=True)
-        series.append({
-            "date": ds,
-            "total": round(sum(day_models.values()), 6),
-            "models": segs,
-        })
+        series.append({"date": ds, "total": round(sum(day_models.values()), 6), "models": segs})
 
-    # --- Sliding last 24h: sum of UTC hours (no timezone needed — rolling
-    #      window, not a calendar boundary).
-    last24 = 0.0
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    hour24_rows = _analytics({
-        "metrics": ["total_usage"],
-        "granularity": "hour",
-        "time_range": {
-            "start": (now_utc - datetime.timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "end": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        },
-        "limit": 1000,
-    })
-    if hour24_rows is not None:
-        for row in hour24_rows:
-            last24 += _as_float(_row_value(row, ["total_usage"]))
+    # last 24h
+    cutoff_ts = now_local.timestamp() - 86400
+    last24 = round(sum(cost for _, _, _, cost, mtime in records if mtime >= cutoff_ts), 6)
 
-    # --- Last hour as 5-minute bars (local timezone).
-    by_min_model = {}
-    min_rows = _analytics({
-        "metrics": ["total_usage"],
-        "dimensions": ["model"],
-        "granularity": "minute",
-        "time_range": {
-            "start": (now_utc - datetime.timedelta(minutes=60)).strftime("%Y-%m-%dT%H:%M:00Z"),
-            "end": now_utc.strftime("%Y-%m-%dT%H:%M:00Z"),
-        },
-        "limit": 2000,
-    })
-    if min_rows is not None:
-        for row in min_rows:
-            key = _row_value(row, ["date__minute", "created_at__minute"])
-            raw_model = _row_value(row, ["model", "model_name"])
-            if key and raw_model:
-                local_dt = _parse_utc_dt(key).astimezone(local_tz)
-                slot_m = (local_dt.minute // 5) * 5
-                slot_key = local_dt.strftime("%H") + f":{slot_m:02d}"
-                can = _canonical_model(raw_model)
-                bucket = by_min_model.setdefault(slot_key, {})
-                bucket[can] = bucket.get(can, 0.0) + _as_float(_row_value(row, ["total_usage"]))
-
-    # Back-fill all 60 minutes so no gaps in the bar array.
+    # last hour
+    hour_cutoff = now_local - datetime.timedelta(hours=1)
+    last_hour_slots = {}
+    for date_str, slot_key, model, cost, mtime in records:
+        try:
+            slot_dt = datetime.datetime.strptime(date_str + " " + slot_key, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
+        except ValueError:
+            continue
+        if slot_dt < hour_cutoff:
+            continue
+        bucket = last_hour_slots.setdefault(slot_key, {})
+        bucket[model] = bucket.get(model, 0.0) + cost
     last_hour_start = now_local - datetime.timedelta(minutes=60)
     minutes_60_local = []
     for i in range(60):
         t = last_hour_start + datetime.timedelta(minutes=i)
         slot_m = (t.minute // 5) * 5
         slot_key = t.strftime("%H") + f":{slot_m:02d}"
-        models_map = by_min_model.get(slot_key, {})
-        segs = [{"model": m, "total": round(v, 6)}
-                for m, v in models_map.items() if v > 0]
+        models_map = last_hour_slots.get(slot_key, {})
+        segs = [{"model": m, "total": round(v, 6)} for m, v in models_map.items() if v > 0]
         segs.sort(key=lambda x: x["total"], reverse=True)
-        minutes_60_local.append({
-            "t": t.strftime("%H:%M"),
-            "total": round(sum(models_map.values()), 6),
+        minutes_60_local.append({"t": t.strftime("%H:%M"), "total": round(sum(models_map.values()), 6), "models": segs})
+    last_hour = []
+    for b in range(12):
+        if b * 5 >= len(minutes_60_local):
+            break
+        merged = {}
+        for m in minutes_60_local[b * 5:(b + 1) * 5]:
+            for seg in m.get("models", []):
+                merged[seg["model"]] = merged.get(seg["model"], 0.0) + seg["total"]
+        segs = [{"model": m, "total": round(v, 6)} for m, v in merged.items() if v > 0]
+        segs.sort(key=lambda x: x["total"], reverse=True)
+        last_hour.append({
+            "t": minutes_60_local[b * 5]["t"],
+            "total": round(sum(x["total"] for x in minutes_60_local[b * 5:(b + 1) * 5]), 6),
             "models": segs,
         })
-    last_hour = [
-        {
-            "t": minutes_60_local[b * 5]["t"],
-            "total": round(sum(x["total"]
-                         for x in minutes_60_local[b * 5:(b + 1) * 5]), 6),
-            "models": _merge_hour_models(minutes_60_local[b * 5:(b + 1) * 5]),
-        }
-        for b in range(12)
-    ]
 
-    # --- Today's 5-minute buckets (local-timezone-aligned). Each bucket has a
-    #      local HH:MM key, a total, and per-model segments.
-    #      Note: OpenRouter's minute granularity is capped at a 3-hour window,
-    #      so we chunk from local midnight to now.
+    # today slots
     today_slots = []
-    today_start_utc = local_midnight_utc(today_local)
-    by_slot = {}
-
-    def fetch_minute_chunk(chunk_start, chunk_end):
-        rows = _analytics({
-            "metrics": ["total_usage"],
-            "dimensions": ["model"],
-            "granularity": "minute",
-            "time_range": {
-                "start": chunk_start.strftime("%Y-%m-%dT%H:%M:00Z"),
-                "end": chunk_end.strftime("%Y-%m-%dT%H:%M:00Z"),
-            },
-            "limit": 5000,
-        })
-        if rows is not None:
-            for row in rows:
-                key = _row_value(row, ["date__minute", "created_at__minute"])
-                raw_model = _row_value(row, ["model", "model_name"])
-                if key and raw_model:
-                    local_dt = _parse_utc_dt(key).astimezone(local_tz)
-                    slot_m = (local_dt.minute // 5) * 5
-                    slot_key = local_dt.strftime("%H") + f":{slot_m:02d}"
-                    can = _canonical_model(raw_model)
-                    bucket = by_slot.setdefault(slot_key, {})
-                    bucket[can] = bucket.get(can, 0.0) + _as_float(_row_value(row, ["total_usage"]))
-
-    # Chunk in 3-hour windows from local midnight UTC to now UTC
-    chunk = today_start_utc
-    while chunk < now_utc:
-        chunk_end = min(chunk + datetime.timedelta(hours=3), now_utc)
-        fetch_minute_chunk(chunk, chunk_end)
-        chunk = chunk_end
-
-    # Emit every 5-min slot from local midnight to now (even empty ones).
-    day_midnight_local = datetime.datetime.combine(
-        today_local, datetime.time.min).replace(tzinfo=local_tz)
+    day_midnight_local = datetime.datetime.combine(today_local, datetime.time.min).replace(tzinfo=local_tz)
     elapsed_mins = int((now_local - day_midnight_local).total_seconds() // 60)
     n_slots = max(1, elapsed_mins // 5 + 1)
     for i in range(n_slots):
         slot_dt = day_midnight_local + datetime.timedelta(minutes=i * 5)
         slot_key = slot_dt.strftime("%H:%M")
-        models_map = by_slot.get(slot_key, {})
-        total = round(sum(models_map.values()), 6)
-        segs = [{"model": m, "total": round(v, 6)}
-                for m, v in models_map.items() if v > 0]
+        models_map = {}
+        for date_str, rec_slot, model, cost, mtime in records:
+            if date_str == today_local.isoformat() and rec_slot == slot_key:
+                models_map[model] = models_map.get(model, 0.0) + cost
+        segs = [{"model": m, "total": round(v, 6)} for m, v in models_map.items() if v > 0]
         segs.sort(key=lambda x: x["total"], reverse=True)
-        today_slots.append({"t": slot_key, "total": total, "models": segs})
+        today_slots.append({"t": slot_key, "total": round(sum(models_map.values()), 6), "models": segs})
 
     out = {
         "month": month_start_local.strftime("%Y-%m"),
         "month_total": month_total,
-        "last24h": round(last24, 6),
-        "lastHourTotal": round(sum(b["total"] for b in last_hour), 6),
+        "last24h": last24,
         "generated_at": int(now_local.timestamp()),
         "days": days,
         "models": models,
@@ -548,16 +513,15 @@ def fetch():
         "lastHour": last_hour,
         "todaySlots": today_slots,
     }
-    write_state("openrouter-spend.json", json.dumps(out).encode("utf-8"))
-    return 0
+    sys.stdout.write(json.dumps(out))
 
 
 def main():
     try:
         if len(sys.argv) >= 2 and sys.argv[1] == "fetch":
             return fetch()
-        if len(sys.argv) == 3 and sys.argv[1] == "read":
-            read_state(sys.argv[2])
+        if sys.argv[1:2] == ["read"]:
+            read()
             return 0
         if len(sys.argv) == 4 and sys.argv[1] == "write-key":
             write_key(sys.argv[2], sys.argv[3])
