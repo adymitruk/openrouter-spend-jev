@@ -182,6 +182,7 @@ BarWidget {
     readonly property int maxDay: Model.maxDayTotal(root.spend)
     readonly property int modelRow: Style.space(root.sp("modelRowHeight", 34))
     readonly property int dayRow: Style.space(root.sp("dayRowHeight", 32))
+    property bool showHelp: false
 
     // Single-line hover tooltip for a day bar: "26 SEP · $2.40" plus the top
     // three contributing models (so the stacked colors are legible).
@@ -219,6 +220,22 @@ BarWidget {
         Layout.preferredHeight: Style.space(28)
         spacing: Style.space(4)
 
+        // ? help icon — click toggles inline help below.
+        Text {
+          text: "?"
+          color: Qt.darker(popup.bar.foreground, 1.4)
+          font.family: popup.bar.fontFamily
+          font.pixelSize: Style.font.body * 1.5
+          font.bold: true
+          anchors.verticalCenter: parent.verticalCenter
+
+          MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            onClicked: popup.showHelp = !popup.showHelp
+          }
+        }
+
         Item { Layout.fillWidth: true }
 
         Text {
@@ -233,6 +250,48 @@ BarWidget {
             cursorShape: Qt.PointingHandCursor
             onClicked: keyDialogProc.running = true
           }
+        }
+      }
+
+      // ---- Inline help text (toggled by clicking ?).
+      Column {
+        visible: popup.showHelp
+        z: 10
+        Layout.fillWidth: true
+        spacing: Style.space(6)
+        topPadding: Style.space(4)
+        bottomPadding: Style.space(4)
+
+        Text {
+          width: parent.width
+          textFormat: Text.RichText
+          wrapMode: Text.WordWrap
+          color: Qt.lighter(popup.bar.foreground, 1.1)
+          font.family: popup.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          lineHeight: 1.5
+          text: "<b>Pill (bar)</b><br>" +
+                "$&lt;month&gt; ($&lt;24h&gt;, $&lt;1h&gt;)<br>" +
+                "Month total · last 24 hours · last hour spend.<br><br>" +
+                "<b>Panel</b><br>" +
+                "• <b>Spend this month</b> — big hero number at top.<br>" +
+                "• <b>LAST 30 DAYS</b> — stacked bar chart, per model per day.<br>" +
+                "• <b>LAST HOUR</b> — 5-minute buckets for the last 60 minutes.<br>" +
+                "• <b>SPEND PER MODEL</b> — ranked by cost this month.<br>" +
+                "• <b>SPEND PER DAY</b> — daily totals, today labelled TODAY.<br>" +
+                "• All times are your local timezone (cut-off at midnight).<br>" +
+                "• Data refreshes every " + root.refreshMinutes + " minutes."
+        }
+
+        Text {
+          width: parent.width
+          textFormat: Text.RichText
+          wrapMode: Text.WordWrap
+          color: Qt.darker(popup.bar.foreground, 1.5)
+          font.family: popup.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          font.italic: true
+          text: "click ? to close"
         }
       }
 
