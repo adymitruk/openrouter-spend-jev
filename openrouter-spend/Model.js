@@ -10,6 +10,7 @@ function parseSpend(raw) {
       month: String(data.month || ""),
       monthTotal: finiteNumber(data.month_total),
       last24h: finiteNumber(data.last24h),
+      lastHourTotal: finiteNumber(data.lastHourTotal),
       generatedAt: finiteNumber(data.generated_at),
       days: Array.isArray(data.days) ? data.days : [],
       models: Array.isArray(data.models) ? data.models : [],
@@ -54,12 +55,15 @@ function barLabel(value) {
   return (neg ? "-$" : "$") + s
 }
 
-// Pill label. The month total is the main figure; when there's spend in the
-// last 24 hours, a bracketed figure rides alongside it: "$18.50 ($1.53)".
-function pillLabel(monthTotal, last24) {
+// Pill label. Shows "$20.00 ($1.00, $0.15)" — month total, last 24h, last hour.
+// The bracketed figures let you see recent activity at a glance.
+function pillLabel(monthTotal, last24, lastHour) {
   var main = barLabel(monthTotal)
-  if (finiteNumber(last24) <= 0) return main
-  return main + " (" + compactMoney(last24) + ")"
+  var parts = []
+  if (finiteNumber(last24) > 0) parts.push(compactMoney(last24))
+  if (finiteNumber(lastHour) > 0) parts.push(compactMoney(lastHour))
+  if (parts.length === 0) return main
+  return main + " (" + parts.join(", ") + ")"
 }
 
 // "deepseek/deepseek-v4-flash-20260731" -> "deepseek v4 flash". Drop the

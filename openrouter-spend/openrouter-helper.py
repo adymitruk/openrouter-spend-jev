@@ -540,6 +540,7 @@ def fetch():
         "month": month_start_local.strftime("%Y-%m"),
         "month_total": month_total,
         "last24h": round(last24, 6),
+        "lastHourTotal": round(sum(b["total"] for b in last_hour), 6),
         "generated_at": int(now_local.timestamp()),
         "days": days,
         "models": models,

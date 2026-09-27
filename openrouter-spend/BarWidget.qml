@@ -146,7 +146,7 @@ BarWidget {
     Text {
       id: pillText
       anchors.centerIn: parent
-      text: Model.pillLabel(root.spend.monthTotal, root.spend.last24h)
+      text: Model.pillLabel(root.spend.monthTotal, root.spend.last24h, root.spend.lastHourTotal)
       textFormat: Text.PlainText
       color: root.bar.foreground
       font.family: root.bar.fontFamily
