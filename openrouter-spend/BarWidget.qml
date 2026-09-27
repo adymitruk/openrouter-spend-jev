@@ -73,11 +73,17 @@ BarWidget {
     if (!fetchProc.running) fetchProc.running = true
   }
 
+  // First poll waits until the key file is on disk. The repeating timer
+  // starts only after that, so it cannot race the startup key sync.
+  function startRefresh() {
+    root.refresh()
+    if (!refreshTimer.running) refreshTimer.start()
+  }
+
   Timer {
+    id: refreshTimer
     interval: root.refreshMinutes * 60 * 1000
-    running: true
     repeat: true
-    triggeredOnStart: true
     onTriggered: root.refresh()
   }
 
@@ -87,12 +93,14 @@ BarWidget {
     command: [root.pythonPath, root.helperPath, "write-key", "openrouter-key", root.setting("openrouterKey", "")]
     onExited: function(exitCode) {
       if (exitCode !== 0) console.warn("openrouter-spend", "key sync failed")
+      root.startRefresh()
     }
   }
 
   Component.onCompleted: {
     var k = root.setting("openrouterKey", "")
     if (k !== "") syncKeyProc.running = true
+    else root.startRefresh()
     root.reload()
   }
 

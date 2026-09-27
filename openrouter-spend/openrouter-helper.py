@@ -29,9 +29,13 @@ import secrets
 import subprocess
 import sys
 
-MAX_RESPONSE = 256 * 1024
+# A full analytics page is up to 10k rows. Keep the cap large enough to
+# hold one of those, and treat anything bigger as "split the window".
+MAX_RESPONSE = 8 * 1024 * 1024
+ANALYTICS_ROW_LIMIT = 10000
 KEY_NAMES = {"openrouter-key"}
 STATE_DIR_NAME = "openrouter-spend"
+_TOO_LARGE = object()
 
 
 def _is_dir(mode):
@@ -166,7 +170,7 @@ def write_key(name, value):
 def _post(url, payload):
     key = read_key()
     if not key:
-        return None, None
+        return None
     p = subprocess.Popen(
         ["curl", "-sS", "--max-time", "25", "-X", "POST", url,
          "-H", "Authorization: Bearer " + key,
@@ -175,14 +179,26 @@ def _post(url, payload):
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
     )
     body = p.stdout.read(MAX_RESPONSE + 1)
+    if len(body) > MAX_RESPONSE:
+        p.kill()
+        p.wait()
+        return _TOO_LARGE
     p.wait()
-    if p.returncode != 0 or len(body) > MAX_RESPONSE:
-        return None, None
-    return p.returncode, body
+    if p.returncode != 0:
+        return None
+    return body
 
 
 def _analytics(payload):
-    status, body = _post("https://openrouter.ai/api/v1/analytics/query", payload)
+    """Return (rows, truncated), _TOO_LARGE, or None on failure.
+
+    truncated is true when the API capped the page or the row count hit
+    the requested limit. There is no offset parameter; callers narrow
+    the time range and query again.
+    """
+    body = _post("https://openrouter.ai/api/v1/analytics/query", payload)
+    if body is _TOO_LARGE:
+        return _TOO_LARGE
     if not body:
         return None
     try:
@@ -195,7 +211,81 @@ def _analytics(payload):
     if not isinstance(data, dict):
         return None
     rows = data.get("data")
-    return rows if isinstance(rows, list) else None
+    if not isinstance(rows, list):
+        return None
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    truncated = bool(meta.get("truncated"))
+    limit = payload.get("limit")
+    if isinstance(limit, int) and len(rows) >= limit:
+        truncated = True
+    return rows, truncated
+
+
+def _utc_stamp(dt):
+    return dt.astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:00Z")
+
+
+def _split_mid(start, end, bucket):
+    """Split point aligned to `bucket` so a time bucket is never cut in half."""
+    start_u = start.astimezone(datetime.timezone.utc).replace(second=0, microsecond=0)
+    end_u = end.astimezone(datetime.timezone.utc).replace(second=0, microsecond=0)
+    if end_u <= start_u:
+        return None
+    step = int(bucket.total_seconds())
+    epoch = datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+    mid_secs = (start_u - epoch).total_seconds() + (end_u - start_u).total_seconds() / 2
+    snapped = (int(mid_secs) // step) * step
+    mid = epoch + datetime.timedelta(seconds=snapped)
+    if mid <= start_u:
+        mid = start_u + bucket
+    if mid >= end_u:
+        return None
+    return mid
+
+
+def _fetch_analytics_range(template, start, end, min_span):
+    """Fetch every analytics row in [start, end).
+
+    Returns (rows, incomplete) or None on a hard request failure.
+    rows come only from windows that were not truncated. incomplete is a
+    list of [start, end) slices that were still truncated at min_span;
+    those slices must not overwrite or delete on-disk spend.
+    """
+    if end <= start:
+        return [], []
+    payload = dict(template)
+    payload["limit"] = ANALYTICS_ROW_LIMIT
+    payload["time_range"] = {"start": _utc_stamp(start), "end": _utc_stamp(end)}
+    result = _analytics(payload)
+    if result is None:
+        return None
+    truncated = result is _TOO_LARGE or result[1]
+    if not truncated:
+        return result[0], []
+    mid = None if (end - start) <= min_span else _split_mid(start, end, min_span)
+    if mid is None:
+        return [], [(start, end)]
+    left = _fetch_analytics_range(template, start, mid, min_span)
+    if left is None:
+        return None
+    right = _fetch_analytics_range(template, mid, end, min_span)
+    if right is None:
+        return None
+    return left[0] + right[0], left[1] + right[1]
+
+
+def _dates_covering(start_utc, end_utc, local_tz):
+    """Local calendar dates overlapped by the half-open interval [start, end)."""
+    if end_utc <= start_utc:
+        return set()
+    first = start_utc.astimezone(local_tz).date()
+    last = (end_utc - datetime.timedelta(microseconds=1)).astimezone(local_tz).date()
+    out = set()
+    day = first
+    while day <= last:
+        out.add(day.isoformat())
+        day += datetime.timedelta(days=1)
+    return out
 
 
 def _row_value(row, keys):
@@ -730,24 +820,26 @@ def fetch():
 
             month_ok = True
             rows = []
+            incomplete_dates = set()
+            hour_query = {
+                "metrics": ["total_usage"],
+                "dimensions": ["model"],
+                "granularity": "hour",
+            }
             window_start = now_utc - datetime.timedelta(days=30)
             chunk = window_start
             while chunk < now_utc:
                 chunk_end = min(chunk + datetime.timedelta(days=7), now_utc)
-                part = _analytics({
-                    "metrics": ["total_usage"],
-                    "dimensions": ["model"],
-                    "granularity": "hour",
-                    "time_range": {
-                        "start": chunk.strftime("%Y-%m-%dT%H:%M:00Z"),
-                        "end": chunk_end.strftime("%Y-%m-%dT%H:%M:00Z"),
-                    },
-                    "limit": 5000,
-                })
+                part = _fetch_analytics_range(
+                    hour_query, chunk, chunk_end, datetime.timedelta(hours=1)
+                )
                 if part is None:
                     month_ok = False
                     break
-                rows.extend(part)
+                part_rows, incomplete = part
+                rows.extend(part_rows)
+                for span_start, span_end in incomplete:
+                    incomplete_dates |= _dates_covering(span_start, span_end, local_tz)
                 chunk = chunk_end
 
             if month_ok:
@@ -761,6 +853,8 @@ def fetch():
                         continue
                     local_dt = _parse_utc_dt(ts).astimezone(local_tz)
                     date_str = local_dt.strftime("%Y-%m-%d")
+                    if date_str in incomplete_dates:
+                        continue
                     can = _canonical_model(raw_model)
                     cost = _as_float(_row_value(row, ["total_usage"]))
                     key = (date_str, can)
@@ -771,7 +865,7 @@ def fetch():
                         hkey = (date_str, hk, can)
                         recent_hours[hkey] = recent_hours.get(hkey, 0.0) + cost
                 written_daily = {}
-                failed_dates = set()
+                failed_dates = set(incomplete_dates)
                 for (date_str, model), cost in by_date_model.items():
                     if _write_model_file(month_fd, date_str, model, cost):
                         written_daily.setdefault(date_str, set()).add(_safe_model_filename(model))
@@ -831,19 +925,21 @@ def fetch():
                 _remove_legacy(sfd)
 
             minute_ok = True
-            minute_rows = _analytics({
-                "metrics": ["total_usage"],
-                "dimensions": ["model"],
-                "granularity": "minute",
-                "time_range": {
-                    "start": (now_utc - datetime.timedelta(minutes=70)).strftime("%Y-%m-%dT%H:%M:00Z"),
-                    "end": now_utc.strftime("%Y-%m-%dT%H:%M:00Z"),
+            minute_rows = []
+            minute_part = _fetch_analytics_range(
+                {
+                    "metrics": ["total_usage"],
+                    "dimensions": ["model"],
+                    "granularity": "minute",
                 },
-                "limit": 5000,
-            })
-            if minute_rows is None:
+                now_utc - datetime.timedelta(minutes=70),
+                now_utc,
+                datetime.timedelta(minutes=1),
+            )
+            if minute_part is None or minute_part[1]:
                 minute_ok = False
             else:
+                minute_rows = minute_part[0]
                 grouped = {}
                 slot_cutoff = now_local - datetime.timedelta(minutes=70)
                 for row in minute_rows:
