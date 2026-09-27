@@ -159,8 +159,8 @@ async def classify_with_jev(state_text: str, api_key: str) -> Tuple[str, float, 
             "lane": {
                 "type": "choice",
                 "instructions": (
-                    "Classify this agent turn into the cheapest tier likely to succeed "
-                    "without errors. When unsure between two tiers, pick the stronger one."
+                    "Classify this agent turn into the most cost-effective model tier "
+                    "capable of succeeding without errors."
                 ),
                 "criteria": {
                     "cheap": (
@@ -169,16 +169,11 @@ async def classify_with_jev(state_text: str, api_key: str) -> Tuple[str, float, 
                     ),
                     "fast_mid": (
                         "Standard multi-step tool calling, bash/awk scripting, file edits, "
-                        "single-file changes on well-understood code, data pipeline "
-                        "orchestration, or routine code changes."
+                        "data pipeline orchestration, or routine code changes."
                     ),
                     "smart_pro": (
-                        "Anything requiring careful reasoning to get right on the first try: "
-                        "debugging or diagnosing failures (not just reading logs), designing or "
-                        "changing algorithms, architecture or refactors spanning multiple files, "
-                        "concurrency or performance work, quantitative math, security-sensitive "
-                        "changes, ambiguous or underspecified requests, or any task where a "
-                        "subtle mistake would be costly to catch later."
+                        "Complex algorithm design, C++/CUDA kernels, subtle bug/traceback "
+                        "diagnosis, quantitative math, concurrency, or deep architecture."
                     ),
                 },
             }
