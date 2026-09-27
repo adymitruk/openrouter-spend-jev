@@ -293,41 +293,68 @@ def _merge_hour_models(minutes):
     return segs
 
 
+def _parse_utc_dt(s):
+    """Parse a UTC ISO timestamp string into an aware datetime.
+
+    OpenRouter's minute-granularity endpoint returns timestamps like
+    '2026-09-27 18:20:00' (space separator, no tz marker). Hour and day
+    granularity returns ISO format with T and possibly Z.
+    Both are UTC — always force +00:00 when no tzinfo is present.
+    """
+    s = str(s).strip().replace("T", " ").replace("Z", "")
+    # fromisoformat accepts the space-separated UTC form — add +00:00 if naive
+    dt = datetime.datetime.fromisoformat(s)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt
+
+
 def fetch():
-    """Aggregate this calendar month's spend from the OpenRouter analytics API."""
-    now = datetime.datetime.now().astimezone()
-    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    next_start = (month_start.replace(day=28) + datetime.timedelta(days=4)).replace(day=1)
+    """Aggregate spend bucketed into local-timezone 5-minute windows."""
+    now_aware = datetime.datetime.now().astimezone()
+    local_tz = now_aware.tzinfo
+    now_local = now_aware
+    today_local = now_local.date()
+    month_start_local = today_local.replace(day=1)
+    next_month_local = (month_start_local.replace(day=28)
+                        + datetime.timedelta(days=4)).replace(day=1)
+
+    def local_midnight_utc(d):
+        naive = datetime.datetime.combine(d, datetime.time.min)
+        return naive.replace(tzinfo=local_tz).astimezone(datetime.timezone.utc)
+
+    month_start_utc = local_midnight_utc(month_start_local)
+    next_month_utc = local_midnight_utc(next_month_local)
     time_range = {
-        "start": month_start.strftime("%Y-%m-%dT00:00:00Z"),
-        "end": next_start.strftime("%Y-%m-%dT00:00:00Z"),
+        "start": month_start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "end": next_month_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
 
-    # --- Spend per day (total across all models).
-    days = []
-    daily_rows = _analytics({
+    # --- Days: hourly buckets from the API, grouped into local calendar days
+    #      by converting each UTC hour to local time.
+    days_by_date = {}
+    hour_rows = _analytics({
         "metrics": ["total_usage"],
-        "granularity": "day",
+        "granularity": "hour",
         "time_range": time_range,
         "limit": 1000,
     })
-    if daily_rows is not None:
-        for row in daily_rows:
-            date_val = _row_value(row, ["date__day", "created_at__day", "created_at"])
-            if not date_val:
+    if hour_rows is not None:
+        for row in hour_rows:
+            ts = _row_value(row, ["date__hour", "created_at__hour", "created_at"])
+            if not ts:
                 continue
-            days.append({
-                "date": str(date_val)[:10],
-                "total": round(_as_float(_row_value(row, ["total_usage"])), 6),
-            })
-        days.sort(key=lambda x: x["date"], reverse=True)
-        month_total = round(sum(d["total"] for d in days), 6)
-    else:
-        month_total = 0.0
+            local_dt = _parse_utc_dt(ts).astimezone(local_tz)
+            local_date_str = local_dt.strftime("%Y-%m-%d")
+            days_by_date[local_date_str] = (
+                days_by_date.get(local_date_str, 0.0)
+                + _as_float(_row_value(row, ["total_usage"]))
+            )
+    days = [{"date": d, "total": round(t, 6)}
+            for d, t in sorted(days_by_date.items(), reverse=True)]
+    month_total = round(sum(d["total"] for d in days), 6) if days else 0.0
 
     # --- Spend per model for the month, most expensive first.
-    # Merge release-date variants (e.g. deepseek-v4-flash-20260731 and
-    # deepseek-v4-flash-20260423) by canonical name.
     model_totals = {}
     model_rows = _analytics({
         "metrics": ["total_usage"],
@@ -345,54 +372,55 @@ def fetch():
                 model_totals.get(_canonical_model(raw_model), 0.0)
                 + _as_float(_row_value(row, ["total_usage"]))
             )
-    models = [{"model": m, "total": round(v, 6)} for m, v in model_totals.items() if v > 0]
+    models = [{"model": m, "total": round(v, 6)}
+              for m, v in model_totals.items() if v > 0]
     models.sort(key=lambda x: x["total"], reverse=True)
 
-    if not days and not models:
-        month_total = 0.0
+    # --- 30-day series: per-model, per-local-day, from hourly API data.
+    start30_local = today_local - datetime.timedelta(days=29)
+    start30_utc = local_midnight_utc(start30_local)
+    end_utc = local_midnight_utc(today_local + datetime.timedelta(days=1))
 
-    # --- Last 30 days, stacked by model, for the popup chart. Days are UTC
-    #      calendar days to match the day buckets the API returns.
-    series = []
-    now_utc = datetime.datetime.now(datetime.timezone.utc)
-    today_utc = now_utc.date()
-    start30 = today_utc - datetime.timedelta(days=29)
     series_rows = _analytics({
         "metrics": ["total_usage"],
         "dimensions": ["model"],
-        "granularity": "day",
+        "granularity": "hour",
         "time_range": {
-            "start": start30.strftime("%Y-%m-%dT00:00:00Z"),
-            "end": (today_utc + datetime.timedelta(days=1)).strftime("%Y-%m-%dT00:00:00Z"),
+            "start": start30_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "end": end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         },
-        "limit": 1000,
+        "limit": 10000,
     })
     bydate = {}
     if series_rows is not None:
         for row in series_rows:
-            date_val = _row_value(row, ["date__day", "created_at__day", "created_at"])
+            ts = _row_value(row, ["date__hour", "created_at__hour", "created_at"])
             raw_model = _row_value(row, ["model", "model_name"])
-            if not date_val or not raw_model:
+            if not ts or not raw_model:
                 continue
-            d = str(date_val)[:10]
+            local_date = _parse_utc_dt(ts).astimezone(local_tz).strftime("%Y-%m-%d")
             can = _canonical_model(raw_model)
-            rec = bydate.setdefault(d, {})
+            rec = bydate.setdefault(local_date, {})
             rec[can] = rec.get(can, 0.0) + _as_float(_row_value(row, ["total_usage"]))
+    series = []
     for i in range(30):
-        d = start30 + datetime.timedelta(days=i)
-        ds = d.strftime("%Y-%m-%d")
+        d = start30_local + datetime.timedelta(days=i)
+        ds = d.isoformat()
         day_models = bydate.get(ds, {})
-        segs = [{"model": m, "total": round(v, 6)} for m, v in day_models.items() if v > 0]
+        segs = [{"model": m, "total": round(v, 6)}
+                for m, v in day_models.items() if v > 0]
         segs.sort(key=lambda x: x["total"], reverse=True)
         series.append({
             "date": ds,
-            "total": round(sum(v for v in day_models.values()), 6),
+            "total": round(sum(day_models.values()), 6),
             "models": segs,
         })
 
-    # --- Spend in the last 24 hours: sum the hourly buckets.
+    # --- Sliding last 24h: sum of UTC hours (no timezone needed — rolling
+    #      window, not a calendar boundary).
     last24 = 0.0
-    hour_rows = _analytics({
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    hour24_rows = _analytics({
         "metrics": ["total_usage"],
         "granularity": "hour",
         "time_range": {
@@ -401,13 +429,11 @@ def fetch():
         },
         "limit": 1000,
     })
-    if hour_rows is not None:
-        for row in hour_rows:
+    if hour24_rows is not None:
+        for row in hour24_rows:
             last24 += _as_float(_row_value(row, ["total_usage"]))
 
-    # --- Spend last hour as 5-minute bars for the "LAST HOUR" chart. Fetch
-    #      minute buckets with per-model breakdown, then group every 5
-    #      consecutive minutes into one bar with stacked model segments.
+    # --- Last hour as 5-minute bars (local timezone).
     by_min_model = {}
     min_rows = _analytics({
         "metrics": ["total_usage"],
@@ -424,37 +450,102 @@ def fetch():
             key = _row_value(row, ["date__minute", "created_at__minute"])
             raw_model = _row_value(row, ["model", "model_name"])
             if key and raw_model:
-                hm = str(key)[11:16]  # "HH:MM" from "YYYY-MM-DD HH:MM:00"
+                local_dt = _parse_utc_dt(key).astimezone(local_tz)
+                slot_m = (local_dt.minute // 5) * 5
+                slot_key = local_dt.strftime("%H") + f":{slot_m:02d}"
                 can = _canonical_model(raw_model)
-                bucket = by_min_model.setdefault(hm, {})
+                bucket = by_min_model.setdefault(slot_key, {})
                 bucket[can] = bucket.get(can, 0.0) + _as_float(_row_value(row, ["total_usage"]))
-    minutes_60 = []
+
+    # Back-fill all 60 minutes so no gaps in the bar array.
+    last_hour_start = now_local - datetime.timedelta(minutes=60)
+    minutes_60_local = []
     for i in range(60):
-        t = now_utc - datetime.timedelta(minutes=59 - i)  # oldest first
-        hm = t.strftime("%H:%M")
-        models_map = by_min_model.get(hm, {})
-        total = round(sum(models_map.values()), 6)
-        segs = [{"model": m, "total": round(v, 6)} for m, v in models_map.items() if v > 0]
+        t = last_hour_start + datetime.timedelta(minutes=i)
+        slot_m = (t.minute // 5) * 5
+        slot_key = t.strftime("%H") + f":{slot_m:02d}"
+        models_map = by_min_model.get(slot_key, {})
+        segs = [{"model": m, "total": round(v, 6)}
+                for m, v in models_map.items() if v > 0]
         segs.sort(key=lambda x: x["total"], reverse=True)
-        minutes_60.append({"t": hm, "total": total, "models": segs})
+        minutes_60_local.append({
+            "t": t.strftime("%H:%M"),
+            "total": round(sum(models_map.values()), 6),
+            "models": segs,
+        })
     last_hour = [
         {
-            "t": minutes_60[b * 5]["t"],
-            "total": round(sum(x["total"] for x in minutes_60[b * 5:(b + 1) * 5]), 6),
-            "models": _merge_hour_models(minutes_60[b * 5:(b + 1) * 5]),
+            "t": minutes_60_local[b * 5]["t"],
+            "total": round(sum(x["total"]
+                         for x in minutes_60_local[b * 5:(b + 1) * 5]), 6),
+            "models": _merge_hour_models(minutes_60_local[b * 5:(b + 1) * 5]),
         }
         for b in range(12)
     ]
 
+    # --- Today's 5-minute buckets (local-timezone-aligned). Each bucket has a
+    #      local HH:MM key, a total, and per-model segments.
+    #      Note: OpenRouter's minute granularity is capped at a 3-hour window,
+    #      so we chunk from local midnight to now.
+    today_slots = []
+    today_start_utc = local_midnight_utc(today_local)
+    by_slot = {}
+
+    def fetch_minute_chunk(chunk_start, chunk_end):
+        rows = _analytics({
+            "metrics": ["total_usage"],
+            "dimensions": ["model"],
+            "granularity": "minute",
+            "time_range": {
+                "start": chunk_start.strftime("%Y-%m-%dT%H:%M:00Z"),
+                "end": chunk_end.strftime("%Y-%m-%dT%H:%M:00Z"),
+            },
+            "limit": 5000,
+        })
+        if rows is not None:
+            for row in rows:
+                key = _row_value(row, ["date__minute", "created_at__minute"])
+                raw_model = _row_value(row, ["model", "model_name"])
+                if key and raw_model:
+                    local_dt = _parse_utc_dt(key).astimezone(local_tz)
+                    slot_m = (local_dt.minute // 5) * 5
+                    slot_key = local_dt.strftime("%H") + f":{slot_m:02d}"
+                    can = _canonical_model(raw_model)
+                    bucket = by_slot.setdefault(slot_key, {})
+                    bucket[can] = bucket.get(can, 0.0) + _as_float(_row_value(row, ["total_usage"]))
+
+    # Chunk in 3-hour windows from local midnight UTC to now UTC
+    chunk = today_start_utc
+    while chunk < now_utc:
+        chunk_end = min(chunk + datetime.timedelta(hours=3), now_utc)
+        fetch_minute_chunk(chunk, chunk_end)
+        chunk = chunk_end
+
+    # Emit every 5-min slot from local midnight to now (even empty ones).
+    day_midnight_local = datetime.datetime.combine(
+        today_local, datetime.time.min).replace(tzinfo=local_tz)
+    elapsed_mins = int((now_local - day_midnight_local).total_seconds() // 60)
+    n_slots = max(1, elapsed_mins // 5 + 1)
+    for i in range(n_slots):
+        slot_dt = day_midnight_local + datetime.timedelta(minutes=i * 5)
+        slot_key = slot_dt.strftime("%H:%M")
+        models_map = by_slot.get(slot_key, {})
+        total = round(sum(models_map.values()), 6)
+        segs = [{"model": m, "total": round(v, 6)}
+                for m, v in models_map.items() if v > 0]
+        segs.sort(key=lambda x: x["total"], reverse=True)
+        today_slots.append({"t": slot_key, "total": total, "models": segs})
+
     out = {
-        "month": month_start.strftime("%Y-%m"),
+        "month": month_start_local.strftime("%Y-%m"),
         "month_total": month_total,
         "last24h": round(last24, 6),
-        "generated_at": int(now.timestamp()),
+        "generated_at": int(now_local.timestamp()),
         "days": days,
         "models": models,
         "series": series,
         "lastHour": last_hour,
+        "todaySlots": today_slots,
     }
     write_state("openrouter-spend.json", json.dumps(out).encode("utf-8"))
     return 0

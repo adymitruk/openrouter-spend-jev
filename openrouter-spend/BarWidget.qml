@@ -186,7 +186,7 @@ BarWidget {
     // Single-line hover tooltip for a day bar: "26 SEP · $2.40" plus the top
     // three contributing models (so the stacked colors are legible).
     function chartTooltip(day) {
-      var label = Model.dayLabel(day.date, "") + " · " + Model.money(day.total)
+      var label = Model.dayLabel(day.date, Model.todayDate()) + " · " + Model.money(day.total)
       var mods = day.models || []
       if (mods.length) {
         var parts = []
@@ -772,7 +772,7 @@ BarWidget {
 
                       Text {
                         width: Style.space(84)
-                        text: Model.dayLabel(modelData.date, "")
+                        text: Model.dayLabel(modelData.date, Model.todayDate())
                         textFormat: Text.PlainText
                         color: popup.bar.foreground
                         font.family: popup.bar.fontFamily

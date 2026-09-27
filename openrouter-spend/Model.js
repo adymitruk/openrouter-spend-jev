@@ -14,7 +14,8 @@ function parseSpend(raw) {
       days: Array.isArray(data.days) ? data.days : [],
       models: Array.isArray(data.models) ? data.models : [],
       series: Array.isArray(data.series) ? data.series : [],
-      lastHour: Array.isArray(data.lastHour) ? data.lastHour : []
+      lastHour: Array.isArray(data.lastHour) ? data.lastHour : [],
+      todaySlots: Array.isArray(data.todaySlots) ? data.todaySlots : []
     }
   } catch (e) {
     return null
@@ -86,6 +87,13 @@ function dayLabel(dateString, todayString) {
   var p = dateParts(dateString)
   if (!p || p.month < 0 || p.month > 11) return String(dateString || "")
   return p.day + " " + MONTHS[p.month]
+}
+
+// Today's local date as "YYYY-MM-DD", matching how the helper emits dates.
+function todayDate() {
+  var d = new Date()
+  var pad = function(n) { return String(n < 10 ? "0" : "") + n }
+  return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate())
 }
 
 // "2026-09" -> "SEP 2026"
@@ -228,6 +236,7 @@ if (typeof module !== "undefined") {
     seriesTickLabel: seriesTickLabel,
     colorForModel: colorForModel,
     compactMoney: compactMoney,
-    timeAgo: timeAgo
+    timeAgo: timeAgo,
+    todayDate: todayDate
   }
 }
