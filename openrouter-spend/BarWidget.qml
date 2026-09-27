@@ -51,8 +51,14 @@ BarWidget {
     return isFinite(v) ? v : fallback
   }
 
-  // ---- data lifecycle: read immediately, then every 5 min re-fetch (which
-  //      rewrites the state file) and re-read it.
+  // ---- data lifecycle: watch state file on disk, re-read immediately on
+  //      any change (including external fetches). Also poll every 5 min as a
+  //      backup (the external minutely cron is the primary trigger).
+  FileSystemWatcher {
+    paths: [root.stateFile]
+    onPathChanged: root.reload()
+  }
+
   Process {
     id: readProc
     command: [root.pythonPath, root.helperPath, "read", "openrouter-spend.json"]
