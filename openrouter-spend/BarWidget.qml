@@ -10,9 +10,11 @@ BarWidget {
   id: root
   moduleName: "adam.openrouter-spend"
 
-  // No state file. The helper writes per-slot per-model files under
-  // settings/openrouter-spend/<date>/<slot>/<model>.json.
-  // The widget reads the directory tree on popup open.
+  // No state file. The helper writes:
+  //   settings/openrouter-spend/last-month/<date>/<model>.json
+  //   settings/openrouter-spend/last-month/hours/<date>/<HH>/<model>.json
+  //   settings/openrouter-spend/last-hour/<date>/<HH:MM>/<model>.json
+  // The widget reads that tree on popup open.
   readonly property string pythonPath: "/usr/bin/python3"
   readonly property string helperPath: String(Qt.resolvedUrl("openrouter-helper.py")).replace(/^file:\/\//, "")
 
@@ -43,8 +45,10 @@ BarWidget {
     return isFinite(v) ? v : fallback
   }
 
-  // ---- data lifecycle: reads the directory tree via the helper on popup open.
-  //      No timers, no state file, no file watchers.
+  readonly property int refreshMinutes: Math.max(1, parseInt(root.setting("refreshMinutes", 5), 10) || 5)
+
+  // ---- data lifecycle: fetch rewrites last-month / last-hour, then read
+  //      aggregates that tree for the pill and the panel.
   Process {
     id: readProc
     command: [root.pythonPath, root.helperPath, "read"]
@@ -55,6 +59,26 @@ BarWidget {
         if (parsed) root.spend = parsed
       }
     }
+  }
+
+  Process {
+    id: fetchProc
+    command: [root.pythonPath, root.helperPath, "fetch"]
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.reload()
+    }
+  }
+
+  function refresh() {
+    if (!fetchProc.running) fetchProc.running = true
+  }
+
+  Timer {
+    interval: root.refreshMinutes * 60 * 1000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.refresh()
   }
 
   // Sync the management key from settings to the state dir on startup.

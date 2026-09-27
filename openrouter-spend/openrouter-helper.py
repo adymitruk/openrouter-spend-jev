@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """OpenRouter spend fetcher for the omarchy bar widget.
 
-State is a directory tree:
-  settings/openrouter-spend/<YYYY-MM-DD>/<HH:MM>/<canonical-model-slug>.json
-Each file contains {"cost": <float>} for one model's spend in one 5-min slot.
+State is a directory tree under settings/openrouter-spend/:
+
+  last-month/<YYYY-MM-DD>/<canonical-model>.json
+      {"cost": <float>, "model": "<slug>"}
+      One file per model per local day. Source for the month total,
+      the per-day and per-model lists, and the 30-day chart.
+
+  last-month/hours/<YYYY-MM-DD>/<HH>/<canonical-model>.json
+      Same payload, one local clock-hour, kept ~26h. Source for last-24h.
+
+  last-hour/<YYYY-MM-DD>/<HH:MM>/<canonical-model>.json
+      Same payload, one 5-minute local slot, kept ~70min. Source for
+      the last-hour bars.
 
 Commands:
-  fetch     Poll OpenRouter analytics, write per-slot per-model files.
+  fetch     Poll OpenRouter analytics and refresh the tree.
   read      Scan the tree, print aggregated JSON to stdout.
   write-key <name> <value>   Write a key file.
 """
@@ -228,6 +238,49 @@ def _safe_model_filename(model):
     return s + ".json"
 
 
+def _write_model_file(parent_fd, date_str, model, cost):
+    """Write <parent>/<date_str>/<model>.json, creating the date dir if needed."""
+    try:
+        dfd = _stat_safe_open(parent_fd, date_str, "date dir", True)
+    except OSError:
+        return False
+    try:
+        fname = _safe_model_filename(model)
+        f = -1
+        tmp = None
+        try:
+            for _ in range(100):
+                tmp = "." + fname + "." + secrets.token_hex(16)
+                try:
+                    f = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                                | os.O_CLOEXEC, 0o600, dir_fd=dfd)
+                    break
+                except FileExistsError:
+                    tmp = None
+            else:
+                raise OSError("no temp slot")
+            data = json.dumps({"cost": round(cost, 6), "model": model}).encode("utf-8")
+            off = 0
+            while off < len(data):
+                off += os.write(f, data[off:])
+            os.fsync(f)
+            os.replace(tmp, fname, src_dir_fd=dfd, dst_dir_fd=dfd)
+            tmp = None
+            os.close(f)
+            f = -1
+        finally:
+            if f != -1:
+                os.close(f)
+            if tmp:
+                try:
+                    os.unlink(tmp, dir_fd=dfd)
+                except OSError:
+                    pass
+        return True
+    finally:
+        os.close(dfd)
+
+
 def write_slot_file(sfd, date_str, slot_key, model, cost):
     try:
         dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sfd)
@@ -262,7 +315,7 @@ def write_slot_file(sfd, date_str, slot_key, model, cost):
                     tmp = None
             else:
                 raise OSError("no temp slot")
-            data = json.dumps({"cost": round(cost, 6)}).encode("utf-8")
+            data = json.dumps({"cost": round(cost, 6), "model": model}).encode("utf-8")
             off = 0
             while off < len(data):
                 off += os.write(f, data[off:])
@@ -284,58 +337,540 @@ def write_slot_file(sfd, date_str, slot_key, model, cost):
         os.close(dfd)
 
 
+def _is_date_name(name):
+    return (
+        len(name) == 10
+        and name[4] == "-"
+        and name[7] == "-"
+        and name[:4].isdigit()
+        and name[5:7].isdigit()
+        and name[8:].isdigit()
+    )
+
+
+def _is_slot_name(name):
+    return len(name) == 5 and name[2] == ":" and name[:2].isdigit() and name[3:].isdigit()
+
+
+def _is_hour_name(name):
+    return len(name) == 2 and name.isdigit()
+
+
+def _model_from_filename(filename):
+    stem = filename[:-5] if filename.endswith(".json") else filename
+    if "_" in stem:
+        author, name = stem.split("_", 1)
+        return author + "/" + name
+    return stem
+
+
+def _read_cost_model(dir_fd, filename):
+    try:
+        mf = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        raw = os.read(mf, 4096)
+    finally:
+        os.close(mf)
+    model = _model_from_filename(filename)
+    cost = 0.0
+    try:
+        obj = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        obj = None
+    if isinstance(obj, dict):
+        cost = _as_float(obj.get("cost", 0))
+        if obj.get("model"):
+            model = str(obj["model"])
+    return model, cost
+
+
+def _rm_tree(parent_fd, name):
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+    except OSError:
+        return
+    try:
+        info = os.fstat(fd)
+        if not _is_dir(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+            return
+        for entry in list(os.listdir(fd)):
+            if not entry or entry in (".", "..") or "/" in entry:
+                continue
+            try:
+                st = os.stat(entry, dir_fd=fd, follow_symlinks=False)
+            except OSError:
+                continue
+            if _is_dir(st.st_mode):
+                _rm_tree(fd, entry)
+            else:
+                try:
+                    os.unlink(entry, dir_fd=fd)
+                except OSError:
+                    pass
+    finally:
+        os.close(fd)
+    try:
+        os.rmdir(name, dir_fd=parent_fd)
+    except OSError:
+        pass
+
+
+def _clear_extra_json(dir_fd, keep):
+    for fn in list(os.listdir(dir_fd)):
+        if fn.endswith(".json") and not fn.startswith(".") and fn not in keep:
+            try:
+                os.unlink(fn, dir_fd=dir_fd)
+            except OSError:
+                pass
+
+
+def _open_named(parent_fd, name, create):
+    return _stat_safe_open(parent_fd, name, name, create, private=True)
+
+
+def _scan_daily(month_fd):
+    records = []
+    for date_str in os.listdir(month_fd):
+        if not _is_date_name(date_str):
+            continue
+        try:
+            dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=month_fd)
+        except OSError:
+            continue
+        try:
+            info = os.fstat(dfd)
+            if not _is_dir(info.st_mode) or info.st_uid != os.getuid():
+                continue
+            for model_file in os.listdir(dfd):
+                if model_file.startswith(".") or not model_file.endswith(".json"):
+                    continue
+                parsed = _read_cost_model(dfd, model_file)
+                if not parsed:
+                    continue
+                model, cost = parsed
+                records.append((date_str, model, cost))
+        finally:
+            os.close(dfd)
+    return records
+
+
+def _scan_hours(month_fd):
+    records = []
+    try:
+        hours_fd = os.open("hours", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=month_fd)
+    except OSError:
+        return records
+    try:
+        info = os.fstat(hours_fd)
+        if not _is_dir(info.st_mode) or info.st_uid != os.getuid():
+            return records
+        for date_str in os.listdir(hours_fd):
+            if not _is_date_name(date_str):
+                continue
+            try:
+                dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=hours_fd)
+            except OSError:
+                continue
+            try:
+                for hour in os.listdir(dfd):
+                    if not _is_hour_name(hour):
+                        continue
+                    try:
+                        hfd = os.open(hour, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+                    except OSError:
+                        continue
+                    try:
+                        hinfo = os.fstat(hfd)
+                        if not _is_dir(hinfo.st_mode) or hinfo.st_uid != os.getuid():
+                            continue
+                        for model_file in os.listdir(hfd):
+                            if model_file.startswith(".") or not model_file.endswith(".json"):
+                                continue
+                            parsed = _read_cost_model(hfd, model_file)
+                            if not parsed:
+                                continue
+                            model, cost = parsed
+                            records.append((date_str, hour, model, cost))
+                    finally:
+                        os.close(hfd)
+            finally:
+                os.close(dfd)
+    finally:
+        os.close(hours_fd)
+    return records
+
+
+def _scan_slots(hour_root_fd):
+    records = []
+    for date_str in os.listdir(hour_root_fd):
+        if not _is_date_name(date_str):
+            continue
+        try:
+            dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=hour_root_fd)
+        except OSError:
+            continue
+        try:
+            info = os.fstat(dfd)
+            if not _is_dir(info.st_mode) or info.st_uid != os.getuid():
+                continue
+            for slot_key in os.listdir(dfd):
+                if not _is_slot_name(slot_key):
+                    continue
+                try:
+                    slotfd = os.open(slot_key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+                except OSError:
+                    continue
+                try:
+                    sinfo = os.fstat(slotfd)
+                    if not _is_dir(sinfo.st_mode) or sinfo.st_uid != os.getuid():
+                        continue
+                    for model_file in os.listdir(slotfd):
+                        if model_file.startswith(".") or not model_file.endswith(".json"):
+                            continue
+                        parsed = _read_cost_model(slotfd, model_file)
+                        if not parsed:
+                            continue
+                        model, cost = parsed
+                        records.append((date_str, slot_key, model, cost))
+                finally:
+                    os.close(slotfd)
+        finally:
+            os.close(dfd)
+    return records
+
+
+def _migrate_legacy(sfd, month_fd, lasthour_fd, now_local):
+    """Copy the old day/ tree and recent 5-min slots into the new layout."""
+    cutoff = now_local - datetime.timedelta(minutes=70)
+    tz = now_local.tzinfo
+    try:
+        day_fd = os.open("day", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sfd)
+    except OSError:
+        day_fd = -1
+    if day_fd != -1:
+        try:
+            for date_str in os.listdir(day_fd):
+                if not _is_date_name(date_str):
+                    continue
+                try:
+                    dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=day_fd)
+                except OSError:
+                    continue
+                try:
+                    for model_file in os.listdir(dfd):
+                        if model_file.startswith(".") or not model_file.endswith(".json"):
+                            continue
+                        parsed = _read_cost_model(dfd, model_file)
+                        if not parsed:
+                            continue
+                        model, cost = parsed
+                        _write_model_file(month_fd, date_str, model, cost)
+                finally:
+                    os.close(dfd)
+        finally:
+            os.close(day_fd)
+    for date_str in os.listdir(sfd):
+        if not _is_date_name(date_str):
+            continue
+        try:
+            dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sfd)
+        except OSError:
+            continue
+        try:
+            for slot_key in os.listdir(dfd):
+                if not _is_slot_name(slot_key):
+                    continue
+                try:
+                    slot_dt = datetime.datetime.strptime(
+                        date_str + " " + slot_key, "%Y-%m-%d %H:%M"
+                    ).replace(tzinfo=tz)
+                except ValueError:
+                    continue
+                if slot_dt < cutoff:
+                    continue
+                try:
+                    slotfd = os.open(slot_key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+                except OSError:
+                    continue
+                try:
+                    for model_file in os.listdir(slotfd):
+                        if model_file.startswith(".") or not model_file.endswith(".json"):
+                            continue
+                        parsed = _read_cost_model(slotfd, model_file)
+                        if not parsed:
+                            continue
+                        model, cost = parsed
+                        try:
+                            write_slot_file(lasthour_fd, date_str, slot_key, model, cost)
+                        except OSError:
+                            pass
+                finally:
+                    os.close(slotfd)
+        finally:
+            os.close(dfd)
+
+
+def _prune_daily(month_fd, today_local):
+    cutoff = (today_local - datetime.timedelta(days=32)).isoformat()
+    for entry in list(os.listdir(month_fd)):
+        if _is_date_name(entry) and entry < cutoff:
+            _rm_tree(month_fd, entry)
+
+
+def _prune_hours(hours_fd, now_local):
+    cutoff = now_local - datetime.timedelta(hours=26)
+    tz = now_local.tzinfo
+    for date_str in list(os.listdir(hours_fd)):
+        if not _is_date_name(date_str):
+            continue
+        try:
+            dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=hours_fd)
+        except OSError:
+            continue
+        empty = False
+        try:
+            for hour in list(os.listdir(dfd)):
+                if not _is_hour_name(hour):
+                    continue
+                try:
+                    start = datetime.datetime.strptime(
+                        date_str + " " + hour, "%Y-%m-%d %H"
+                    ).replace(tzinfo=tz)
+                except ValueError:
+                    continue
+                if start < cutoff:
+                    _rm_tree(dfd, hour)
+            empty = not os.listdir(dfd)
+        finally:
+            os.close(dfd)
+        if empty:
+            try:
+                os.rmdir(date_str, dir_fd=hours_fd)
+            except OSError:
+                pass
+
+
+def _prune_slots(hour_root_fd, now_local):
+    cutoff = now_local - datetime.timedelta(minutes=70)
+    tz = now_local.tzinfo
+    for date_str in list(os.listdir(hour_root_fd)):
+        if not _is_date_name(date_str):
+            continue
+        try:
+            day = datetime.date.fromisoformat(date_str)
+        except ValueError:
+            continue
+        if day < (now_local.date() - datetime.timedelta(days=2)):
+            _rm_tree(hour_root_fd, date_str)
+            continue
+        try:
+            dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=hour_root_fd)
+        except OSError:
+            continue
+        empty = False
+        try:
+            for slot_key in list(os.listdir(dfd)):
+                if not _is_slot_name(slot_key):
+                    continue
+                try:
+                    slot_dt = datetime.datetime.strptime(
+                        date_str + " " + slot_key, "%Y-%m-%d %H:%M"
+                    ).replace(tzinfo=tz)
+                except ValueError:
+                    continue
+                if slot_dt < cutoff:
+                    _rm_tree(dfd, slot_key)
+            empty = not os.listdir(dfd)
+        finally:
+            os.close(dfd)
+        if empty:
+            try:
+                os.rmdir(date_str, dir_fd=hour_root_fd)
+            except OSError:
+                pass
+
+
+def _remove_legacy(sfd):
+    for entry in list(os.listdir(sfd)):
+        if entry == "day" or _is_date_name(entry):
+            _rm_tree(sfd, entry)
+
+
+def _drop_stale_daily(month_fd, start_date, end_date, written, failed):
+    day = start_date
+    while day <= end_date:
+        date_str = day.isoformat()
+        day += datetime.timedelta(days=1)
+        if date_str in failed:
+            continue
+        try:
+            dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=month_fd)
+        except OSError:
+            continue
+        try:
+            _clear_extra_json(dfd, written.get(date_str, set()))
+        finally:
+            os.close(dfd)
+
+
 def fetch():
-    now_aware = datetime.datetime.now().astimezone()
-    local_tz = now_aware.tzinfo
-    now_local = now_aware
+    now_local = datetime.datetime.now().astimezone()
+    local_tz = now_local.tzinfo
     today_local = now_local.date()
-
-    def local_midnight_utc(d):
-        naive = datetime.datetime.combine(d, datetime.time.min)
-        return naive.replace(tzinfo=local_tz).astimezone(datetime.timezone.utc)
-
-    today_start_utc = local_midnight_utc(today_local)
     now_utc = datetime.datetime.now(datetime.timezone.utc)
 
     sfd, parent_fd = state_dir_fd()
     try:
-        def fetch_minute_chunk(chunk_start, chunk_end):
-            rows = _analytics({
+        month_fd = _open_named(sfd, "last-month", True)
+        hour_fd = _open_named(sfd, "last-hour", True)
+        try:
+            _migrate_legacy(sfd, month_fd, hour_fd, now_local)
+
+            month_ok = True
+            rows = []
+            window_start = now_utc - datetime.timedelta(days=30)
+            chunk = window_start
+            while chunk < now_utc:
+                chunk_end = min(chunk + datetime.timedelta(days=7), now_utc)
+                part = _analytics({
+                    "metrics": ["total_usage"],
+                    "dimensions": ["model"],
+                    "granularity": "hour",
+                    "time_range": {
+                        "start": chunk.strftime("%Y-%m-%dT%H:%M:00Z"),
+                        "end": chunk_end.strftime("%Y-%m-%dT%H:%M:00Z"),
+                    },
+                    "limit": 5000,
+                })
+                if part is None:
+                    month_ok = False
+                    break
+                rows.extend(part)
+                chunk = chunk_end
+
+            if month_ok:
+                by_date_model = {}
+                recent_hours = {}
+                hour_cutoff = now_local - datetime.timedelta(hours=26)
+                for row in rows:
+                    ts = _row_value(row, ["date__hour", "created_at__hour", "created_at"])
+                    raw_model = _row_value(row, ["model", "model_name"])
+                    if not ts or not raw_model:
+                        continue
+                    local_dt = _parse_utc_dt(ts).astimezone(local_tz)
+                    date_str = local_dt.strftime("%Y-%m-%d")
+                    can = _canonical_model(raw_model)
+                    cost = _as_float(_row_value(row, ["total_usage"]))
+                    key = (date_str, can)
+                    by_date_model[key] = by_date_model.get(key, 0.0) + cost
+                    hour_start = local_dt.replace(minute=0, second=0, microsecond=0)
+                    if hour_start >= hour_cutoff:
+                        hk = hour_start.strftime("%H")
+                        hkey = (date_str, hk, can)
+                        recent_hours[hkey] = recent_hours.get(hkey, 0.0) + cost
+                written_daily = {}
+                failed_dates = set()
+                for (date_str, model), cost in by_date_model.items():
+                    if _write_model_file(month_fd, date_str, model, cost):
+                        written_daily.setdefault(date_str, set()).add(_safe_model_filename(model))
+                    else:
+                        failed_dates.add(date_str)
+                for date_str in failed_dates:
+                    written_daily.pop(date_str, None)
+                _drop_stale_daily(
+                    month_fd,
+                    today_local - datetime.timedelta(days=30),
+                    today_local,
+                    written_daily,
+                    failed_dates,
+                )
+                try:
+                    hours_fd = _open_named(month_fd, "hours", True)
+                except OSError:
+                    hours_fd = -1
+                if hours_fd != -1:
+                    try:
+                        written_hours = {}
+                        for (date_str, hour, model), cost in recent_hours.items():
+                            try:
+                                write_slot_file(hours_fd, date_str, hour, model, cost)
+                            except OSError:
+                                continue
+                            written_hours.setdefault((date_str, hour), set()).add(
+                                _safe_model_filename(model)
+                            )
+                        for (date_str, hour), keep in written_hours.items():
+                            try:
+                                dfd = os.open(
+                                    date_str,
+                                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    dir_fd=hours_fd,
+                                )
+                            except OSError:
+                                continue
+                            try:
+                                hfd = os.open(
+                                    hour,
+                                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                                    dir_fd=dfd,
+                                )
+                            except OSError:
+                                os.close(dfd)
+                                continue
+                            try:
+                                _clear_extra_json(hfd, keep)
+                            finally:
+                                os.close(hfd)
+                                os.close(dfd)
+                        _prune_hours(hours_fd, now_local)
+                    finally:
+                        os.close(hours_fd)
+                _prune_daily(month_fd, today_local)
+                _remove_legacy(sfd)
+
+            minute_ok = True
+            minute_rows = _analytics({
                 "metrics": ["total_usage"],
                 "dimensions": ["model"],
                 "granularity": "minute",
                 "time_range": {
-                    "start": chunk_start.strftime("%Y-%m-%dT%H:%M:00Z"),
-                    "end": chunk_end.strftime("%Y-%m-%dT%H:%M:00Z"),
+                    "start": (now_utc - datetime.timedelta(minutes=70)).strftime("%Y-%m-%dT%H:%M:00Z"),
+                    "end": now_utc.strftime("%Y-%m-%dT%H:%M:00Z"),
                 },
                 "limit": 5000,
             })
-            if rows is None:
-                return
-            grouped = {}
-            for row in rows:
-                ts = _row_value(row, ["date__minute", "created_at__minute"])
-                raw_model = _row_value(row, ["model", "model_name"])
-                if not ts or not raw_model:
-                    continue
-                local_dt = _parse_utc_dt(ts).astimezone(local_tz)
-                date_str = local_dt.strftime("%Y-%m-%d")
-                slot_m = (local_dt.minute // 5) * 5
-                slot_key = local_dt.strftime("%H") + f":{slot_m:02d}"
-                can = _canonical_model(raw_model)
-                key = (date_str, slot_key, can)
-                grouped[key] = grouped.get(key, 0.0) + _as_float(_row_value(row, ["total_usage"]))
-            for (date_str, slot_key, model), cost in grouped.items():
-                try:
-                    write_slot_file(sfd, date_str, slot_key, model, cost)
-                except OSError:
-                    pass
-
-        chunk = today_start_utc
-        while chunk < now_utc:
-            chunk_end = min(chunk + datetime.timedelta(hours=3), now_utc)
-            fetch_minute_chunk(chunk, chunk_end)
-            chunk = chunk_end
+            if minute_rows is None:
+                minute_ok = False
+            else:
+                grouped = {}
+                slot_cutoff = now_local - datetime.timedelta(minutes=70)
+                for row in minute_rows:
+                    ts = _row_value(row, ["date__minute", "created_at__minute"])
+                    raw_model = _row_value(row, ["model", "model_name"])
+                    if not ts or not raw_model:
+                        continue
+                    local_dt = _parse_utc_dt(ts).astimezone(local_tz)
+                    slot_m = (local_dt.minute // 5) * 5
+                    slot_dt = local_dt.replace(minute=slot_m, second=0, microsecond=0)
+                    if slot_dt < slot_cutoff:
+                        continue
+                    date_str = slot_dt.strftime("%Y-%m-%d")
+                    slot_key = slot_dt.strftime("%H:%M")
+                    can = _canonical_model(raw_model)
+                    key = (date_str, slot_key, can)
+                    grouped[key] = grouped.get(key, 0.0) + _as_float(_row_value(row, ["total_usage"]))
+                for (date_str, slot_key, model), cost in grouped.items():
+                    try:
+                        write_slot_file(hour_fd, date_str, slot_key, model, cost)
+                    except OSError:
+                        minute_ok = False
+                if minute_ok:
+                    _prune_slots(hour_fd, now_local)
+        finally:
+            os.close(month_fd)
+            os.close(hour_fd)
     finally:
         os.close(sfd)
         os.close(parent_fd)
@@ -343,61 +878,40 @@ def fetch():
 
 
 def read():
-    sfd, parent_fd = state_dir_fd()
     now_local = datetime.datetime.now().astimezone()
     local_tz = now_local.tzinfo
     today_local = now_local.date()
     month_start_local = today_local.replace(day=1)
 
-    records = []
+    sfd, parent_fd = state_dir_fd()
+    daily = []
+    hours = []
+    slots = []
     try:
-        for entry in os.listdir(sfd):
-            if len(entry) != 10 or entry[4] != "-" or entry[7] != "-":
-                continue
-            date_str = entry
+        try:
+            month_fd = _open_named(sfd, "last-month", False)
+        except OSError:
+            month_fd = -1
+        if month_fd != -1:
             try:
-                dfd = os.open(date_str, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=sfd)
-            except OSError:
-                continue
-            try:
-                for slot_entry in os.listdir(dfd):
-                    if len(slot_entry) != 5 or slot_entry[2] != ":":
-                        continue
-                    slot_key = slot_entry
-                    try:
-                        slotfd = os.open(slot_key, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
-                    except OSError:
-                        continue
-                    try:
-                        for model_file in os.listdir(slotfd):
-                            if not model_file.endswith(".json"):
-                                continue
-                            try:
-                                mf = os.open(model_file, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=slotfd)
-                            except OSError:
-                                continue
-                            try:
-                                raw = os.read(mf, 4096)
-                                info = os.fstat(mf)
-                                mtime = info.st_mtime if info else 0
-                            finally:
-                                os.close(mf)
-                            try:
-                                obj = json.loads(raw.decode("utf-8", "replace"))
-                                cost = _as_float(obj.get("cost", 0))
-                            except (ValueError, AttributeError):
-                                cost = 0.0
-                            slug = model_file[:-5].replace("_", "/")
-                            records.append((date_str, slot_key, slug, cost, mtime))
-                    finally:
-                        os.close(slotfd)
+                daily = _scan_daily(month_fd)
+                hours = _scan_hours(month_fd)
             finally:
-                os.close(dfd)
+                os.close(month_fd)
+        try:
+            hour_fd = _open_named(sfd, "last-hour", False)
+        except OSError:
+            hour_fd = -1
+        if hour_fd != -1:
+            try:
+                slots = _scan_slots(hour_fd)
+            finally:
+                os.close(hour_fd)
     finally:
         os.close(sfd)
         os.close(parent_fd)
 
-    if not records:
+    if not daily and not hours and not slots:
         empty = {
             "month": month_start_local.strftime("%Y-%m"),
             "month_total": 0.0,
@@ -412,21 +926,21 @@ def read():
         sys.stdout.write(json.dumps(empty))
         return
 
-    # per day
+    month_threshold = month_start_local.isoformat()
     days_by_date = {}
-    model_totals_all = {}
-    for date_str, slot_key, model, cost, mtime in records:
+    model_totals = {}
+    for date_str, model, cost in daily:
         days_by_date[date_str] = days_by_date.get(date_str, 0.0) + cost
-        model_totals_all[model] = model_totals_all.get(model, 0.0) + cost
+        if date_str >= month_threshold:
+            model_totals[model] = model_totals.get(model, 0.0) + cost
     days = [{"date": d, "total": round(t, 6)} for d, t in sorted(days_by_date.items(), reverse=True)]
-    month_total = round(sum(d["total"] for d in days), 6)
-    models = [{"model": m, "total": round(t, 6)} for m, t in model_totals_all.items() if t > 0]
+    month_total = round(sum(t for d, t in days_by_date.items() if d >= month_threshold), 6)
+    models = [{"model": m, "total": round(t, 6)} for m, t in model_totals.items() if t > 0]
     models.sort(key=lambda x: x["total"], reverse=True)
 
-    # 30-day series
     start30_local = today_local - datetime.timedelta(days=29)
     series_bydate = {}
-    for date_str, slot_key, model, cost, mtime in records:
+    for date_str, model, cost in daily:
         try:
             d = datetime.date.fromisoformat(date_str)
         except ValueError:
@@ -444,63 +958,77 @@ def read():
         segs.sort(key=lambda x: x["total"], reverse=True)
         series.append({"date": ds, "total": round(sum(day_models.values()), 6), "models": segs})
 
-    # last 24h
-    cutoff_ts = now_local.timestamp() - 86400
-    last24 = round(sum(cost for _, _, _, cost, mtime in records if mtime >= cutoff_ts), 6)
+    cutoff_24 = now_local - datetime.timedelta(hours=24)
+    last24 = 0.0
+    if hours:
+        for date_str, hour, _model, cost in hours:
+            try:
+                start = datetime.datetime.strptime(
+                    date_str + " " + hour, "%Y-%m-%d %H"
+                ).replace(tzinfo=local_tz)
+            except ValueError:
+                continue
+            end = start + datetime.timedelta(hours=1)
+            if end > cutoff_24 and start <= now_local:
+                last24 += cost
+    else:
+        today_str = today_local.isoformat()
+        last24 = sum(cost for date_str, _model, cost in daily if date_str == today_str)
+    last24 = round(last24, 6)
 
-    # last hour
-    hour_cutoff = now_local - datetime.timedelta(hours=1)
-    last_hour_slots = {}
-    for date_str, slot_key, model, cost, mtime in records:
+    # One bar per 5-minute slot whose start falls in the last 60 minutes.
+    # Each slot file is the whole bucket, so it is counted once.
+    # Floor to the 5-minute slot that contains "60 minutes ago" so a bucket
+    # straddling the cutoff is included once, not dropped.
+    window_start = now_local - datetime.timedelta(minutes=60)
+    minute = (window_start.minute // 5) * 5
+    boundary = window_start.replace(minute=minute, second=0, microsecond=0)
+    by_slot = {}
+    for date_str, slot_key, model, cost in slots:
         try:
-            slot_dt = datetime.datetime.strptime(date_str + " " + slot_key, "%Y-%m-%d %H:%M").replace(tzinfo=local_tz)
+            slot_dt = datetime.datetime.strptime(
+                date_str + " " + slot_key, "%Y-%m-%d %H:%M"
+            ).replace(tzinfo=local_tz)
         except ValueError:
             continue
-        if slot_dt < hour_cutoff:
+        if slot_dt < boundary or slot_dt > now_local:
             continue
-        bucket = last_hour_slots.setdefault(slot_key, {})
+        bucket = by_slot.setdefault((date_str, slot_key), {})
         bucket[model] = bucket.get(model, 0.0) + cost
-    last_hour_start = now_local - datetime.timedelta(minutes=60)
-    minutes_60_local = []
-    for i in range(60):
-        t = last_hour_start + datetime.timedelta(minutes=i)
-        slot_m = (t.minute // 5) * 5
-        slot_key = t.strftime("%H") + f":{slot_m:02d}"
-        models_map = last_hour_slots.get(slot_key, {})
+    last_hour = []
+    slot_dt = boundary
+    while slot_dt <= now_local and len(last_hour) < 13:
+        date_str = slot_dt.strftime("%Y-%m-%d")
+        slot_key = slot_dt.strftime("%H:%M")
+        models_map = by_slot.get((date_str, slot_key), {})
         segs = [{"model": m, "total": round(v, 6)} for m, v in models_map.items() if v > 0]
         segs.sort(key=lambda x: x["total"], reverse=True)
-        minutes_60_local.append({"t": t.strftime("%H:%M"), "total": round(sum(models_map.values()), 6), "models": segs})
-    last_hour = []
-    for b in range(12):
-        if b * 5 >= len(minutes_60_local):
-            break
-        merged = {}
-        for m in minutes_60_local[b * 5:(b + 1) * 5]:
-            for seg in m.get("models", []):
-                merged[seg["model"]] = merged.get(seg["model"], 0.0) + seg["total"]
-        segs = [{"model": m, "total": round(v, 6)} for m, v in merged.items() if v > 0]
-        segs.sort(key=lambda x: x["total"], reverse=True)
         last_hour.append({
-            "t": minutes_60_local[b * 5]["t"],
-            "total": round(sum(x["total"] for x in minutes_60_local[b * 5:(b + 1) * 5]), 6),
+            "t": slot_key,
+            "total": round(sum(models_map.values()), 6),
             "models": segs,
         })
+        slot_dt += datetime.timedelta(minutes=5)
 
-    # today slots
     today_slots = []
     day_midnight_local = datetime.datetime.combine(today_local, datetime.time.min).replace(tzinfo=local_tz)
     elapsed_mins = int((now_local - day_midnight_local).total_seconds() // 60)
     n_slots = max(1, elapsed_mins // 5 + 1)
+    today_str = today_local.isoformat()
     for i in range(n_slots):
         slot_dt = day_midnight_local + datetime.timedelta(minutes=i * 5)
         slot_key = slot_dt.strftime("%H:%M")
         models_map = {}
-        for date_str, rec_slot, model, cost, mtime in records:
-            if date_str == today_local.isoformat() and rec_slot == slot_key:
+        for date_str, rec_slot, model, cost in slots:
+            if date_str == today_str and rec_slot == slot_key:
                 models_map[model] = models_map.get(model, 0.0) + cost
         segs = [{"model": m, "total": round(v, 6)} for m, v in models_map.items() if v > 0]
         segs.sort(key=lambda x: x["total"], reverse=True)
-        today_slots.append({"t": slot_key, "total": round(sum(models_map.values()), 6), "models": segs})
+        today_slots.append({
+            "t": slot_key,
+            "total": round(sum(models_map.values()), 6),
+            "models": segs,
+        })
 
     out = {
         "month": month_start_local.strftime("%Y-%m"),

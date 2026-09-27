@@ -54,19 +54,14 @@ function barLabel(value) {
   return (neg ? "-$" : "$") + s
 }
 
-// Pill label. Shows "$20.00 ($1.00, $0.15)" — month total, last 24h, last hour.
-// lastHour is the lastHour array from state (12 x 5-min bars); lastHourTotal
-// is computed by summing the bar totals.
+// Pill label. "$22.18 ($4.51, $0.33)" — month total, last 24h, last 60 minutes.
+// lastHour is the 5-minute bars; the third figure is their sum, counted once each.
 function pillLabel(monthTotal, last24, lastHour) {
   var main = barLabel(monthTotal)
-  var parts = []
-  if (finiteNumber(last24) > 0) parts.push(compactMoney(last24))
   var hourTotal = 0
   var bars = Array.isArray(lastHour) ? lastHour : []
   for (var i = 0; i < bars.length; i++) hourTotal += finiteNumber(bars[i] && bars[i].total)
-  if (hourTotal > 0) parts.push(compactMoney(hourTotal))
-  if (parts.length === 0) return main
-  return main + " (" + parts.join(", ") + ")"
+  return main + " (" + compactMoney(last24) + ", " + compactMoney(hourTotal) + ")"
 }
 
 // "deepseek/deepseek-v4-flash-20260731" -> "deepseek v4 flash". Drop the
