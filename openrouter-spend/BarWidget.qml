@@ -220,6 +220,8 @@ BarWidget {
         Layout.preferredHeight: Style.space(28)
         spacing: Style.space(4)
 
+        Item { Layout.fillWidth: true }
+
         // ? help icon — click toggles inline help below.
         Text {
           text: "?"
@@ -227,7 +229,7 @@ BarWidget {
           font.family: popup.bar.fontFamily
           font.pixelSize: Style.font.body * 1.5
           font.bold: true
-          anchors.verticalCenter: parent.verticalCenter
+          Layout.alignment: Qt.AlignVCenter
 
           MouseArea {
             anchors.fill: parent
@@ -236,14 +238,12 @@ BarWidget {
           }
         }
 
-        Item { Layout.fillWidth: true }
-
         Text {
           text: "\uF013"
           color: Qt.darker(popup.bar.foreground, 1.4)
           font.family: "JetBrainsMono Nerd Font"
           font.pixelSize: Style.font.body * 1.5
-          anchors.verticalCenter: parent.verticalCenter
+          Layout.alignment: Qt.AlignVCenter
 
           MouseArea {
             anchors.fill: parent
