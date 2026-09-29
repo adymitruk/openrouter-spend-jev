@@ -243,7 +243,18 @@ async def proxy_chat_completions(request: Request):
     auth_header = request.headers.get("Authorization")   # access gate only
     api_key = OPENROUTER_KEY or (auth_header or "").replace("Bearer ", "").strip()
 
-    body = await request.json()
+    body = None
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(
+            status_code=400,
+            content={"error": {
+                "type": "invalid_request_error",
+                "code": "invalid_json",
+                "message": "Request body must be valid JSON.",
+            }},
+        )
     requested_model = body.get("model", "jev-custom")
     messages = body.get("messages", [])
     has_tools = bool(body.get("tools"))
