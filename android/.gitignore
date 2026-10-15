@@ -1,0 +1,10 @@
+# Ignore build artifacts
+OpenRouterSpend/app/build/
+OpenRouterSpend/.gradle/
+OpenRouterSpend/gradle/wrapper/gradle-wrapper.jar
+OpenRouterSpend/gradlew
+OpenRouterSpend/gradlew.bat
+OpenRouterSpend/orspend-debug.keystore
+
+# Ignore Docker builder context
+Dockerfile.builder
