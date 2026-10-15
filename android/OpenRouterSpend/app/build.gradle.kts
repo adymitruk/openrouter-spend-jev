@@ -5,32 +5,35 @@ plugins {
 
 android {
     namespace = "com.orspend.app"
-    compileSdk = 35
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.orspend.app"
         minSdk = 28
-        targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        targetSdk = 34
+        versionCode = 2
+        versionName = "1.1"
     }
 
     signingConfigs {
-        create("release") {
-            storeFile = file(rootProject.projectDir.resolve("orspend-debug.keystore"))
+        create("releaseSign") {
+            storeFile = file(rootProject.projectDir.resolve("release-key.jks"))
             storePassword = "REDACTED"
-            keyAlias = "androiddebugkey"
+            keyAlias = "orspend"
             keyPassword = "REDACTED"
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("releaseSign")
+        }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
-        }
-        debug {
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.getByName("releaseSign")
         }
     }
 
