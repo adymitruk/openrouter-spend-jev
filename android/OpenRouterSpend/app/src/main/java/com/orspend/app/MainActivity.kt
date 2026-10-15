@@ -442,7 +442,14 @@ class SpendService : Service() {
             .build()
 
         if (!started) {
-            startForeground(NOTIFICATION_ID, notification)
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(
+                    NOTIFICATION_ID, notification,
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
             started = true
         } else {
             val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
