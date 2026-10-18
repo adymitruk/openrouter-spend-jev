@@ -38,6 +38,11 @@ PlasmaExtras.Representation {
     readonly property int rowHeight: Math.round(Kirigami.Units.gridUnit * 1.55)
     readonly property bool bothLists: modelRowCount > 0 && dayRowCount > 0
     readonly property int innerWidth: Math.max(Kirigami.Units.gridUnit * 16, popupWidth - Kirigami.Units.largeSpacing * 2)
+    // Omarchy popup uses a fixed height so list flickables get space; here the body is
+    // implicit-height inside a Flickable — Layout.fillHeight on lists collapses to zero.
+    readonly property int listAreaHeight: Math.max(
+                Kirigami.Units.gridUnit * 10,
+                Math.min(Kirigami.Units.gridUnit * 20, Math.floor(popupHeight * 0.38)))
 
     Layout.minimumWidth: Math.min(popupWidth, Kirigami.Units.gridUnit * 22)
     Layout.minimumHeight: Math.min(popupHeight, Kirigami.Units.gridUnit * 14)
@@ -161,29 +166,18 @@ PlasmaExtras.Representation {
         }
     }
 
-    contentItem: Flickable {
-        id: flick
+    contentItem: PlasmaComponents.ScrollView {
+        id: outerScroll
         clip: true
-        boundsBehavior: Flickable.StopAtBounds
-        contentWidth: width
-        contentHeight: bodyWrapper.implicitHeight
-        flickableDirection: Flickable.VerticalFlick
 
-        Item {
-            id: bodyWrapper
-            width: flick.width
-            implicitHeight: body.implicitHeight + Kirigami.Units.largeSpacing * 2
+        ColumnLayout {
+            id: body
+            width: outerScroll.availableWidth
+            spacing: Kirigami.Units.smallSpacing
 
-            ColumnLayout {
-                id: body
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.top: parent.top
-                anchors.margins: Kirigami.Units.largeSpacing
-                spacing: Kirigami.Units.smallSpacing
-
-        RowLayout {
+            RowLayout {
             Layout.fillWidth: true
+            Layout.topMargin: Kirigami.Units.largeSpacing
             spacing: Kirigami.Units.smallSpacing
 
             Item { Layout.fillWidth: true }
@@ -221,7 +215,7 @@ PlasmaExtras.Representation {
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 text: "Pill: $month ($24h, $1h). Month total, then the last 24 hours, then the last hour.\n\n" +
                       "Spend this month is the large figure. LAST 30 DAYS is stacked by model. LAST HOUR is 5-minute buckets. SPEND PER MODEL is this month, ranked. SPEND PER DAY labels today as TODAY.\n\n" +
-                      "Days are cut off at local midnight. The panel reads the cache from disk each time it opens. Click the gear to set the management key."
+                      "Days are cut off at local midnight. Data refreshes from OpenRouter when the popup opens. Click the gear to set the management key."
             }
         }
 
@@ -412,7 +406,8 @@ PlasmaExtras.Representation {
 
         RowLayout {
             Layout.fillWidth: true
-            Layout.fillHeight: true
+            Layout.preferredHeight: panel.modelRowCount > 0 || panel.dayRowCount > 0
+                                      ? panel.listAreaHeight + Kirigami.Units.gridUnit * 2.2 : 0
             spacing: Kirigami.Units.largeSpacing
 
             ColumnLayout {
@@ -420,24 +415,21 @@ PlasmaExtras.Representation {
                 Layout.fillWidth: !panel.bothLists
                 Layout.preferredWidth: panel.bothLists ? Math.round(panel.innerWidth * 0.58) : -1
                 Layout.maximumWidth: panel.bothLists ? Math.round(panel.innerWidth * 0.62) : -1
-                Layout.fillHeight: true
                 spacing: Kirigami.Units.smallSpacing
 
                 SectionLabel { text: "SPEND PER MODEL" }
 
-                Flickable {
-                    id: modelFlick
+                Item {
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    contentWidth: width
-                    contentHeight: modelColumn.implicitHeight
-                    flickableDirection: Flickable.VerticalFlick
+                    Layout.preferredHeight: panel.listAreaHeight
 
-                    Column {
-                        id: modelColumn
-                        width: modelFlick.width
+                    PlasmaComponents.ScrollView {
+                        id: modelScroll
+                        anchors.fill: parent
+
+                        Column {
+                            id: modelColumn
+                            width: modelScroll.availableWidth
                         spacing: 2
 
                         Repeater {
@@ -491,9 +483,6 @@ PlasmaExtras.Representation {
                             }
                         }
                     }
-
-                    QQC2.ScrollBar.vertical: QQC2.ScrollBar {
-                        policy: QQC2.ScrollBar.AsNeeded
                     }
                 }
             }
@@ -501,24 +490,21 @@ PlasmaExtras.Representation {
             ColumnLayout {
                 visible: panel.dayRowCount > 0
                 Layout.fillWidth: true
-                Layout.fillHeight: true
                 spacing: Kirigami.Units.smallSpacing
 
                 SectionLabel { text: "SPEND PER DAY" }
 
-                Flickable {
-                    id: dayFlick
+                Item {
                     Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    boundsBehavior: Flickable.StopAtBounds
-                    contentWidth: width
-                    contentHeight: dayColumn.implicitHeight
-                    flickableDirection: Flickable.VerticalFlick
+                    Layout.preferredHeight: panel.listAreaHeight
 
-                    Column {
-                        id: dayColumn
-                        width: dayFlick.width
+                    PlasmaComponents.ScrollView {
+                        id: dayScroll
+                        anchors.fill: parent
+
+                        Column {
+                            id: dayColumn
+                            width: dayScroll.availableWidth
 
                         Repeater {
                             model: panel.dayRows
@@ -539,7 +525,7 @@ PlasmaExtras.Representation {
                                 RowLayout {
                                     anchors.fill: parent
                                     anchors.leftMargin: Kirigami.Units.smallSpacing
-                                    anchors.rightMargin: Kirigami.Units.smallSpacing
+                                    anchors.rightMargin: Kirigami.Units.smallSpacing * 2
 
                                     PlasmaComponents.Label {
                                         Layout.preferredWidth: Kirigami.Units.gridUnit * 4.5
@@ -558,9 +544,6 @@ PlasmaExtras.Representation {
                             }
                         }
                     }
-
-                    QQC2.ScrollBar.vertical: QQC2.ScrollBar {
-                        policy: QQC2.ScrollBar.AsNeeded
                     }
                 }
             }
@@ -568,6 +551,7 @@ PlasmaExtras.Representation {
 
         PlasmaComponents.Label {
             Layout.fillWidth: true
+            Layout.bottomMargin: Kirigami.Units.largeSpacing
             visible: panel.fetchBusy || panel.lastError !== "" || Model.finiteNumber(panel.spend.generatedAt) > 0
             horizontalAlignment: Text.AlignHCenter
             font.italic: true
@@ -575,11 +559,6 @@ PlasmaExtras.Representation {
             color: panel.lastError !== "" ? Kirigami.Theme.negativeTextColor : panel.secondary
             text: panel.fetchBusy ? "fetching…" : (panel.lastError !== "" ? panel.lastError : ("since " + Model.timeAgo(panel.spend.generatedAt, panel.updatedNow / 1000)))
         }
-            }
-        }
-
-        QQC2.ScrollBar.vertical: QQC2.ScrollBar {
-            policy: QQC2.ScrollBar.AsNeeded
         }
     }
 }
