@@ -23,8 +23,8 @@
         </entry>
         <entry name="popupHeight" type="Int">
             <label>Popup height (pixels)</label>
-            <default>400</default>
-            <min>240</min>
+            <default>780</default>
+            <min>400</min>
             <max>1200</max>
         </entry>
     </group>

@@ -32,7 +32,7 @@ PlasmoidItem {
         var configured = parseInt(Plasmoid.configuration.popupHeight, 10)
         if (isFinite(configured) && configured > 0)
             return configured
-        return Kirigami.Units.gridUnit * 24
+        return Kirigami.Units.gridUnit * 48
     }
 
     preferredRepresentation: Plasmoid.formFactor === PlasmaCore.Types.Planar ? fullRepresentation : null
@@ -128,8 +128,10 @@ PlasmoidItem {
     }
 
     onExpandedChanged: function(nowExpanded) {
-        if (nowExpanded)
-            readNow()
+        if (nowExpanded) {
+            loadCachedSpend()
+            refresh()
+        }
     }
 
     Component.onCompleted: startupTimer.start()
