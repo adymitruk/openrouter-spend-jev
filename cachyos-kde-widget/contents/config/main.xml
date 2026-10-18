@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+      http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+    <kcfgfile name=""/>
+    <group name="General">
+        <entry name="refreshMinutes" type="Int">
+            <label>Refresh interval (minutes)</label>
+            <default>5</default>
+            <min>1</min>
+            <max>120</max>
+        </entry>
+        <entry name="openrouterKey" type="String">
+            <label>OpenRouter management key</label>
+            <default></default>
+        </entry>
+        <entry name="popupWidth" type="Int">
+            <label>Popup width (pixels)</label>
+            <default>560</default>
+            <min>320</min>
+            <max>1200</max>
+        </entry>
+        <entry name="popupHeight" type="Int">
+            <label>Popup height (pixels)</label>
+            <default>400</default>
+            <min>240</min>
+            <max>1200</max>
+        </entry>
+    </group>
+</kcfg>

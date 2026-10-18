@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "adam"
+            }
+        ],
+        "Category": "Online Services",
+        "Description": "Shows dollars spent this month on OpenRouter. Click for a per-day and per-model breakdown.",
+        "Icon": "openrouter-spend",
+        "Id": "com.adam.openrouterspend",
+        "Name": "OpenRouter Spend",
+        "Version": "1.0.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}

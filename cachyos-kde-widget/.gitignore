@@ -1,0 +1,26 @@
+# Python bytecode (local experiments)
+__pycache__/
+*.py[cod]
+
+# QML / Plasma runtime cache (plasmashell, qmlcachegen)
+*.qmlc
+*.jsc
+*.kcache
+.cache/
+
+# Editor / OS junk
+*~
+*.swp
+.DS_Store
+
+# Local install / packaging scratch
+*.plasmoid
+build/
+dist/
+
+# Never commit keys or user config exports
+*.env
+.env*
+*-secrets.*
+appletsrc
+plasma-org.kde.plasma.desktop-appletsrc

@@ -1,0 +1,19 @@
+---
+description: KDE Plasma 6 plasmoid work — consult official docs first
+globs: cachyos-kde-widget/**/*
+alwaysApply: false
+---
+
+# KDE Plasma widget development
+
+When changing `cachyos-kde-widget/`, read the relevant **KDE Developer** docs before implementing or guessing APIs:
+
+- [Setup](https://develop.kde.org/docs/plasma/widget/setup/) — `PlasmoidItem`, compact/full representation, popup sizing (`Layout.preferredWidth` / `Layout.preferredHeight` on `fullRepresentation`)
+- [Configuration](https://develop.kde.org/docs/plasma/widget/configuration/) — `main.xml`, `config.qml`, `KCM.SimpleKCM`, `plasmoid.configuration.*`
+- [Porting to KF6](https://develop.kde.org/docs/plasma/widget/porting_kf6/) — metadata (`X-Plasma-API-Minimum-Version`, no `X-Plasma-MainScript`)
+- [Properties](https://develop.kde.org/docs/plasma/widget/properties/) — `Plasmoid` vs `PlasmoidItem` vs `plasmoid`
+- [Examples](https://develop.kde.org/docs/plasma/widget/examples/)
+
+For HTTP from QML, prefer **XMLHttpRequest** in a `.pragma library` JS file ([Qt XMLHttpRequest](https://doc.qt.io/qt-6/qml-qtqml-xmlhttprequest.html), [Plasmoid tutorial — getting data](https://blog.davidedmundson.co.uk/blog/plasmoid-tutorial-2-getting-data/)). Avoid Python helpers in this package.
+
+Prefer `systemctl --user restart plasma-plasmashell.service` over `plasmashell --replace` when testing installs.
