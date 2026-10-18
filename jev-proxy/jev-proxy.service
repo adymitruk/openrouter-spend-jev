@@ -5,7 +5,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/adam/.local/bin/jev-proxy.py
+# %h keeps this portable; if the distro python has no fastapi/uvicorn/httpx
+# (PEP 668 distros), point this at a venv interpreter instead.
+ExecStart=/usr/bin/python3 %h/.local/bin/jev-proxy.py
 Restart=on-failure
 RestartSec=3
 

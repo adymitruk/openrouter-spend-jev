@@ -17,6 +17,7 @@ android/
     │       └── java/com/orspend/app/MainActivity.kt
     ├── build.gradle.kts
     ├── settings.gradle.kts
+    ├── keystore.properties.example                       (copy → keystore.properties; gitignored)
     └── release-key.jks                                   (generate, not committed)
 ```
 
@@ -38,13 +39,18 @@ cd android/OpenRouterSpend
 gradle wrapper --gradle-version 8.9
 
 # Launch the APK (if you previously built with a debug keystore, this is optional)
-# Create a release key store (⚠️ for development only — KMS or CI secrets in production)
+# Create a release key store. Omit -storepass/-keypass so keytool prompts —
+# never put a password on the command line or in a committed file.
 keytool -genkeypair -v \
     -keystore release-key.jks \
     -alias orspend \
     -keyalg RSA -keysize 2048 -validity 10000 \
-    -storepass REDACTED -keypass REDACTED \
     -dname "CN=ORSpend, OU=Dev, O=ORSpend, L=City, S=State, C=US"
+
+# Then create the credentials file Gradle reads (see keystore.properties.example):
+#   cp keystore.properties.example keystore.properties
+#   $EDITOR keystore.properties        # storePassword=/keyPassword=
+# keystore.properties, *.jks and *.keystore are gitignored.
 ```
 
 ### 2. Build
@@ -74,14 +80,32 @@ aapt2 dump badging app/build/outputs/apk/release/app-release.apk
 ```bash
 apksigner sign \
     --ks release-key.jks \
-    --ks-pass pass:REDACTED \
-    --key-pass pass:REDACTED \
+    --ks-pass env:STOREPASS \
+    --key-pass env:STOREPASS \
     --v1-signing-enabled \
     --v2-signing-enabled \
     --v3-signing-enabled \
     --out app-release-signed.apk \
     app/build/outputs/apk/release/app-release.apk
 ```
+
+## Signing credentials (never committed)
+
+`app/build.gradle.kts` reads the store path, passwords and key alias from
+`keystore.properties` in `android/OpenRouterSpend/` (gitignored), falling back to
+environment variables of the same name:
+
+```
+storeFile=release-key.jks
+storePassword=<your password>
+keyAlias=orspend
+keyPassword=<your password>
+```
+
+`keytool` and `apksigner` prompt, or take `--ks-pass env:STOREPASS` — a password
+belongs in neither the command line nor a tracked file. Any release-signing
+password that was ever committed must be treated as public: regenerate the
+keystore and pick a new password.
 
 ## Known Fixes Applied (Installation Failures)
 
@@ -108,7 +132,7 @@ AGP 8.x **ignores** `enableV1Signing`/`enableV2Signing` in `signingConfigs` when
 ```bash
 zipalign -f -p -v 4 unsigned.apk aligned.apk
 apksigner sign \
-  --ks release-key.jks --ks-pass pass:REDACTED --key-pass pass:REDACTED \
+  --ks release-key.jks --ks-pass env:STOREPASS --key-pass env:STOREPASS \
   --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
   --min-sdk-version 21 \                    # ← THIS is critical for V1/V2 emission
   --out final-signed.apk \
@@ -191,16 +215,17 @@ cd android/OpenRouterSpend
 gradle wrapper --gradle-version 8.9
 keytool -genkeypair -v -keystore release-key.jks \
   -alias orspend -keyalg RSA -keysize 2048 -validity 10000 \
-  -storepass REDACTED -keypass REDACTED \
   -dname "CN=ORSpend, OU=Dev, O=ORSpend, L=City, S=State, C=US"
+cp keystore.properties.example keystore.properties   # then fill in the passwords
 
 # 2. Build (Gradle — emits V3 only)
 ./gradlew clean assembleRelease
 
 # 3. Align + re-sign with V1+V2+V3
+read -rsp "keystore password: " STOREPASS; export STOREPASS
 zipalign -f -p -v 4 app/build/outputs/apk/release/app-release.apk release-aligned.apk
 apksigner sign \
-  --ks release-key.jks --ks-pass pass:REDACTED --key-pass pass:REDACTED \
+  --ks release-key.jks --ks-pass env:STOREPASS --key-pass env:STOREPASS \
   --v1-signing-enabled --v2-signing-enabled --v3-signing-enabled \
   --min-sdk-version 21 \
   --out app-release-v123.apk \

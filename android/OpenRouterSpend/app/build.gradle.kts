@@ -3,6 +3,17 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// ── Signing credentials ──────────────────────────────────────────────────────
+// Taken from keystore.properties (gitignored — copy keystore.properties.example)
+// or from environment variables of the same name (CI secrets). This repository is
+// public: no credential belongs in this file.
+val keystoreProps = java.util.Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
+fun cred(name: String): String? = keystoreProps.getProperty(name) ?: System.getenv(name)
+
 android {
     namespace = "com.orspend.app"
     compileSdk = 34
@@ -17,10 +28,10 @@ android {
 
     signingConfigs {
         create("releaseSign") {
-            storeFile = file(rootProject.projectDir.resolve("release-key.jks"))
-            storePassword = "REDACTED"
-            keyAlias = "orspend"
-            keyPassword = "REDACTED"
+            storeFile = file(rootProject.projectDir.resolve(cred("storeFile") ?: "release-key.jks"))
+            storePassword = cred("storePassword")
+            keyAlias = cred("keyAlias") ?: "orspend"
+            keyPassword = cred("keyPassword")
             enableV1Signing = true
             enableV2Signing = true
             enableV3Signing = true
