@@ -1,2 +1,18 @@
 __pycache__/
-*.pyc
+*.py[cod]
+
+# Local Plasma / QML test trees (agent installs, qmlcache)
+.test-home-ors/
+.pkgroot-test/
+**/*.qmlc
+**/*.jsc
+
+# Secrets / env (repo uses widget config + user home for keys)
+.env
+.env.*
+*.pem
+
+# Cursor IDE — ignore local state; keep shared project rules
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**

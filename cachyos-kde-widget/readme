@@ -1,0 +1,29 @@
+OpenRouter Spend for KDE Plasma. Same figures as the Omarchy bar widget: a panel icon with badge, and a breakdown popup when you click it.
+
+KDE widget docs (check these when changing QML or metadata): https://develop.kde.org/docs/plasma/widget/
+
+Panel: wallet icon plus a pill with `$<month> ($<24h>, $<1h>)`. Click for the full breakdown popup.
+
+Panel: month total, last 30 days stacked by model, last hour in 5-minute buckets, spend per model, spend per day. Days cut off at local midnight.
+
+Management key: widget settings only (`sk-or-...` placeholder in docs — never commit real keys). Cache: Qt Quick LocalStorage under your Plasma profile (not in this repo).
+
+Install from the repo root:
+
+```
+kpackagetool6 -t Plasma/Applet -i cachyos-kde-widget
+```
+
+Add **OpenRouter Spend** to a panel. Right-click the pill → Configure, and paste an OpenRouter management key (`sk-or-...`). The gear in the panel opens the same dialog.
+
+After later changes:
+
+```
+kpackagetool6 -t Plasma/Applet -u cachyos-kde-widget
+```
+
+If the widget does not appear in the picker, restart the shell:
+
+```
+systemctl --user restart plasma-plasmashell.service
+```
