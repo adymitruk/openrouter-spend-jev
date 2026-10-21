@@ -2,7 +2,9 @@ import QtQuick
 import QtQuick.Layouts
 import QtQuick.Controls as QQC2
 import org.kde.plasma.components as PlasmaComponents
+import org.kde.plasma.core as PlasmaCore
 import org.kde.plasma.extras as PlasmaExtras
+import org.kde.plasma.plasmoid
 import org.kde.kirigami as Kirigami
 import "Model.js" as Model
 
@@ -60,19 +62,21 @@ PlasmaExtras.Representation {
         return total
     }
 
-    function tip(title, total, models) {
-        var label = title + " · " + Model.money(total)
+    function tipMain(title, total) {
+        return title + " · " + Model.money(total)
+    }
+
+    function tipSub(models) {
         var mods = models && models.length ? models : []
         if (!mods.length)
-            return label
-        var parts = []
-        var n = Math.min(mods.length, 3)
+            return ""
+        var lines = []
+        var n = Math.min(mods.length, 6)
         for (var i = 0; i < n; i++)
-            parts.push(Model.shortModel(mods[i].model) + " " + Model.money(mods[i].total))
-        label += "  |  " + parts.join(" · ")
+            lines.push(Model.shortModel(mods[i].model) + "  " + Model.money(mods[i].total))
         if (mods.length > n)
-            label += " +" + (mods.length - n) + " more"
-        return label
+            lines.push("+" + (mods.length - n) + " more")
+        return lines.join("\n")
     }
 
     component SectionLabel: PlasmaComponents.Label {
@@ -214,8 +218,8 @@ PlasmaExtras.Representation {
                 color: panel.secondary
                 font.pixelSize: Kirigami.Theme.smallFont.pixelSize
                 text: "Pill: $month ($24h, $1h). Month total, then the last 24 hours, then the last hour.\n\n" +
-                      "Spend this month is the large figure. LAST 30 DAYS is stacked by model. LAST HOUR is 5-minute buckets. SPEND PER MODEL is this month, ranked. SPEND PER DAY labels today as TODAY.\n\n" +
-                      "Days are cut off at local midnight. Data refreshes from OpenRouter when the popup opens. Click the gear to set the management key."
+                      "Spend this month is the large figure. LAST 30 DAYS is stacked by model. LAST HOUR is 5-minute buckets. Hover a bar for totals and per-model breakdown. SPEND PER MODEL is this month, ranked. SPEND PER DAY labels today as TODAY.\n\n" +
+                      "Days are cut off at local midnight. Opening the popup refetches minute buckets when data is older than 15 seconds (LAST HOUR and the pill’s $1h figure). Click the gear to set the management key."
             }
         }
 
@@ -319,14 +323,12 @@ PlasmaExtras.Representation {
                                 }
                             }
 
-                            MouseArea {
-                                id: dayHover
+                            PlasmaCore.ToolTipArea {
                                 anchors.fill: parent
-                                hoverEnabled: true
-                                PlasmaComponents.ToolTip {
-                                    visible: dayHover.containsMouse
-                                    text: panel.tip(Model.dayLabel(modelData.date, Model.todayDate()), modelData.total, modelData.models)
-                                }
+                                location: Plasmoid.location
+                                textFormat: Text.PlainText
+                                mainText: panel.tipMain(Model.dayLabel(modelData.date, Model.todayDate()), modelData.total)
+                                subText: panel.tipSub(modelData.models)
                             }
                         }
                     }
@@ -383,14 +385,12 @@ PlasmaExtras.Representation {
                                 }
                             }
 
-                            MouseArea {
-                                id: hourHover
+                            PlasmaCore.ToolTipArea {
                                 anchors.fill: parent
-                                hoverEnabled: true
-                                PlasmaComponents.ToolTip {
-                                    visible: hourHover.containsMouse
-                                    text: panel.tip(modelData.t, modelData.total, modelData.models)
-                                }
+                                location: Plasmoid.location
+                                textFormat: Text.PlainText
+                                mainText: panel.tipMain(modelData.t, modelData.total)
+                                subText: panel.tipSub(modelData.models)
                             }
                         }
                     }

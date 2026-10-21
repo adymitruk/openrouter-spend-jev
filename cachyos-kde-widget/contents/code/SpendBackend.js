@@ -206,6 +206,104 @@ function fetchWindowChunks(apiKey, template, windowStart, windowEnd, minSpanMs, 
     nextChunk()
 }
 
+// Rolling 60-minute window: floor to the 5-minute slot that contains the
+// instant 60 minutes ago (not the top of the clock hour).
+function lastHourChartBoundary(nowLocal) {
+    var windowStart = new Date(nowLocal.getTime() - 60 * 60000)
+    var minute = Math.floor(windowStart.getMinutes() / 5) * 5
+    return new Date(windowStart.getFullYear(), windowStart.getMonth(), windowStart.getDate(),
+                    windowStart.getHours(), minute, 0, 0)
+}
+
+function rebuildSlotCharts(slotTuples, nowLocal) {
+    var todayLocal = localDateString(nowLocal)
+    var boundary = lastHourChartBoundary(nowLocal)
+    var bySlot = {}
+    for (var sl = 0; sl < slotTuples.length; sl++) {
+        var slotRow = slotTuples[sl]
+        var slotDt = new Date(slotRow.date + "T" + slotRow.slot + ":00")
+        if (isNaN(slotDt.getTime()) || slotDt < boundary || slotDt > nowLocal)
+            continue
+        var sk = slotRow.date + "\0" + slotRow.slot
+        if (!bySlot[sk])
+            bySlot[sk] = {}
+        bySlot[sk][slotRow.model] = (bySlot[sk][slotRow.model] || 0) + slotRow.cost
+    }
+    var lastHour = []
+    var slotDtIter = new Date(boundary.getTime())
+    while (slotDtIter <= nowLocal && lastHour.length < 13) {
+        var dateStr = localDateString(slotDtIter)
+        var slotKey = pad2(slotDtIter.getHours()) + ":" + pad2(slotDtIter.getMinutes())
+        var modelsMap = bySlot[dateStr + "\0" + slotKey] || {}
+        var hourSegs = []
+        var hourSum = 0
+        for (var hm in modelsMap) {
+            if (modelsMap[hm] > 0) {
+                hourSegs.push({ model: hm, total: Math.round(modelsMap[hm] * 1e6) / 1e6 })
+                hourSum += modelsMap[hm]
+            }
+        }
+        hourSegs.sort(function(a, b) { return b.total - a.total })
+        lastHour.push({ t: slotKey, total: Math.round(hourSum * 1e6) / 1e6, models: hourSegs })
+        slotDtIter = new Date(slotDtIter.getTime() + 5 * 60000)
+    }
+
+    var dayMidnight = new Date(nowLocal.getFullYear(), nowLocal.getMonth(), nowLocal.getDate())
+    var elapsedMins = Math.floor((nowLocal - dayMidnight) / 60000)
+    var nSlots = Math.max(1, Math.floor(elapsedMins / 5) + 1)
+    var todaySlots = []
+    for (var ti = 0; ti < nSlots; ti++) {
+        var tSlot = new Date(dayMidnight.getTime() + ti * 5 * 60000)
+        var tKey = pad2(tSlot.getHours()) + ":" + pad2(tSlot.getMinutes())
+        var tMap = {}
+        for (var tj = 0; tj < slotTuples.length; tj++) {
+            var tr = slotTuples[tj]
+            if (tr.date === todayLocal && tr.slot === tKey)
+                tMap[tr.model] = (tMap[tr.model] || 0) + tr.cost
+        }
+        var tSegs = []
+        var tSum = 0
+        for (var tm in tMap) {
+            if (tMap[tm] > 0) {
+                tSegs.push({ model: tm, total: Math.round(tMap[tm] * 1e6) / 1e6 })
+                tSum += tMap[tm]
+            }
+        }
+        tSegs.sort(function(a, b) { return b.total - a.total })
+        todaySlots.push({ t: tKey, total: Math.round(tSum * 1e6) / 1e6, models: tSegs })
+    }
+    return { lastHour: lastHour, todaySlots: todaySlots }
+}
+
+function fetchMinuteWindow(apiKey, allowIncomplete, done) {
+    if (typeof allowIncomplete === "function") {
+        done = allowIncomplete
+        allowIncomplete = false
+    }
+    var nowLocal = new Date()
+    var nowUtc = new Date()
+    var minuteEnd = new Date(nowUtc.getTime())
+    var minuteStart = new Date(nowUtc.getTime() - 70 * 60000)
+    fetchAnalyticsRange(apiKey, {
+        metrics: ["total_usage"],
+        dimensions: ["model"],
+        granularity: "minute"
+    }, minuteStart, minuteEnd, 60000, function(errMin, minuteRows, incompleteMin) {
+        if (errMin) {
+            done(errMin)
+            return
+        }
+        if (incompleteMin.length) {
+            if (allowIncomplete)
+                done(null, [])
+            else
+                done("OpenRouter minute data incomplete")
+            return
+        }
+        done(null, rowsToSlots(minuteRows, nowLocal))
+    })
+}
+
 function buildSpendPayload(dailyTuples, hourTuples, slotTuples) {
     var nowLocal = new Date()
     var todayLocal = localDateString(nowLocal)
@@ -305,64 +403,7 @@ function buildSpendPayload(dailyTuples, hourTuples, slotTuples) {
     }
     last24 = Math.round(last24 * 1e6) / 1e6
 
-    var windowStart = new Date(nowLocal.getTime() - 60 * 60000)
-    var minute = Math.floor(windowStart.getMinutes() / 5) * 5
-    var boundary = new Date(windowStart.getFullYear(), windowStart.getMonth(), windowStart.getDate(),
-                            windowStart.getHours(), minute, 0, 0)
-    var bySlot = {}
-    for (var sl = 0; sl < slotTuples.length; sl++) {
-        var slotRow = slotTuples[sl]
-        var slotDt = new Date(slotRow.date + "T" + slotRow.slot + ":00")
-        if (isNaN(slotDt.getTime()) || slotDt < boundary || slotDt > nowLocal)
-            continue
-        var sk = slotRow.date + "\0" + slotRow.slot
-        if (!bySlot[sk])
-            bySlot[sk] = {}
-        bySlot[sk][slotRow.model] = (bySlot[sk][slotRow.model] || 0) + slotRow.cost
-    }
-    var lastHour = []
-    var slotDtIter = new Date(boundary.getTime())
-    while (slotDtIter <= nowLocal && lastHour.length < 13) {
-        var dateStr = localDateString(slotDtIter)
-        var slotKey = pad2(slotDtIter.getHours()) + ":" + pad2(slotDtIter.getMinutes())
-        var modelsMap = bySlot[dateStr + "\0" + slotKey] || {}
-        var hourSegs = []
-        var hourSum = 0
-        for (var hm in modelsMap) {
-            if (modelsMap[hm] > 0) {
-                hourSegs.push({ model: hm, total: Math.round(modelsMap[hm] * 1e6) / 1e6 })
-                hourSum += modelsMap[hm]
-            }
-        }
-        hourSegs.sort(function(a, b) { return b.total - a.total })
-        lastHour.push({ t: slotKey, total: Math.round(hourSum * 1e6) / 1e6, models: hourSegs })
-        slotDtIter = new Date(slotDtIter.getTime() + 5 * 60000)
-    }
-
-    var dayMidnight = new Date(nowLocal.getFullYear(), nowLocal.getMonth(), nowLocal.getDate())
-    var elapsedMins = Math.floor((nowLocal - dayMidnight) / 60000)
-    var nSlots = Math.max(1, Math.floor(elapsedMins / 5) + 1)
-    var todaySlots = []
-    for (var ti = 0; ti < nSlots; ti++) {
-        var tSlot = new Date(dayMidnight.getTime() + ti * 5 * 60000)
-        var tKey = pad2(tSlot.getHours()) + ":" + pad2(tSlot.getMinutes())
-        var tMap = {}
-        for (var tj = 0; tj < slotTuples.length; tj++) {
-            var tr = slotTuples[tj]
-            if (tr.date === todayLocal && tr.slot === tKey)
-                tMap[tr.model] = (tMap[tr.model] || 0) + tr.cost
-        }
-        var tSegs = []
-        var tSum = 0
-        for (var tm in tMap) {
-            if (tMap[tm] > 0) {
-                tSegs.push({ model: tm, total: Math.round(tMap[tm] * 1e6) / 1e6 })
-                tSum += tMap[tm]
-            }
-        }
-        tSegs.sort(function(a, b) { return b.total - a.total })
-        todaySlots.push({ t: tKey, total: Math.round(tSum * 1e6) / 1e6, models: tSegs })
-    }
+    var slotCharts = rebuildSlotCharts(slotTuples, nowLocal)
 
     return JSON.stringify({
         month: monthKey,
@@ -372,8 +413,8 @@ function buildSpendPayload(dailyTuples, hourTuples, slotTuples) {
         days: days,
         models: models,
         series: series,
-        lastHour: lastHour,
-        todaySlots: todaySlots
+        lastHour: slotCharts.lastHour,
+        todaySlots: slotCharts.todaySlots
     })
 }
 
@@ -464,19 +505,46 @@ function fetchSpend(apiKey, done) {
             return
         }
         var dh = rowsToDailyHour(hourRows, incompleteDates, nowLocal)
-        var minuteEnd = new Date(nowUtc.getTime())
-        var minuteStart = new Date(nowUtc.getTime() - 70 * 60000)
-        fetchAnalyticsRange(apiKey, {
-            metrics: ["total_usage"],
-            dimensions: ["model"],
-            granularity: "minute"
-        }, minuteStart, minuteEnd, 60000, function(errMin, minuteRows, incompleteMin) {
+        fetchMinuteWindow(apiKey, true, function(errMin, slots) {
             if (errMin) {
                 done(errMin)
                 return
             }
-            var slots = incompleteMin.length ? [] : rowsToSlots(minuteRows, nowLocal)
+            if (!slots)
+                slots = []
             done(null, buildSpendPayload(dh.daily, dh.hours, slots))
         })
+    })
+}
+
+// Refresh only minute-resolution buckets (~70 minutes), merge into cached payload.
+function fetchRecentSpend(apiKey, cachedJson, done) {
+    var key = String(apiKey || "").trim()
+    if (key.indexOf("sk-or-") !== 0) {
+        done("Management key not set")
+        return
+    }
+    var cached = null
+    try {
+        if (cachedJson)
+            cached = JSON.parse(String(cachedJson))
+    } catch (e) {
+        cached = null
+    }
+    if (!cached || typeof cached !== "object") {
+        fetchSpend(key, done)
+        return
+    }
+    fetchMinuteWindow(key, function(err, slots) {
+        if (err) {
+            done(err)
+            return
+        }
+        var nowLocal = new Date()
+        var charts = rebuildSlotCharts(slots, nowLocal)
+        cached.generated_at = Math.floor(nowLocal.getTime() / 1000)
+        cached.lastHour = charts.lastHour
+        cached.todaySlots = charts.todaySlots
+        done(null, JSON.stringify(cached))
     })
 }

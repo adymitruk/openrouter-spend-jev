@@ -21,6 +21,7 @@ PlasmoidItem {
         var n = parseInt(Plasmoid.configuration.refreshMinutes, 10)
         return isFinite(n) && n >= 1 ? Math.min(n, 120) : 5
     }
+    readonly property int detailRefreshStaleSeconds: 15
     readonly property string pillText: Model.pillLabel(spend.monthTotal, spend.last24h, spend.lastHour)
     readonly property int popupWidth: {
         var configured = parseInt(Plasmoid.configuration.popupWidth, 10)
@@ -51,7 +52,7 @@ PlasmoidItem {
                     "OpenRouterSpendWidget", "1.0", "OpenRouter spend cache", 1000000)
     }
 
-    function loadCachedSpend() {
+    function readCachedSpendJson() {
         var json = ""
         var database = spendDatabase()
         database.transaction(function(tx) {
@@ -60,11 +61,23 @@ PlasmoidItem {
             if (rs.rows.length > 0)
                 json = rs.rows.item(0).json
         })
+        return json
+    }
+
+    function loadCachedSpend() {
+        var json = readCachedSpendJson()
         if (!json)
             return
         var parsed = Model.parseSpend(json)
         if (parsed)
             applySpend(parsed)
+    }
+
+    function dataAgeSeconds() {
+        var ga = spend.generatedAt
+        if (!ga || ga <= 0)
+            return Number.POSITIVE_INFINITY
+        return Date.now() / 1000 - ga
     }
 
     function saveCachedSpend(json) {
@@ -91,6 +104,14 @@ PlasmoidItem {
         })
     }
 
+    function applyFetchedJson(json) {
+        root.clearError()
+        root.saveCachedSpend(json)
+        var parsed = Model.parseSpend(json)
+        if (parsed)
+            root.applySpend(parsed)
+    }
+
     function refresh() {
         var key = String(Plasmoid.configuration.openrouterKey || "").trim()
         if (key.indexOf("sk-or-") !== 0) {
@@ -108,11 +129,36 @@ PlasmoidItem {
                     root.loadCachedSpend()
                     return
                 }
-                root.clearError()
-                root.saveCachedSpend(json)
-                var parsed = Model.parseSpend(json)
-                if (parsed)
-                    root.applySpend(parsed)
+                root.applyFetchedJson(json)
+            })
+        })
+    }
+
+    function refreshForDetails() {
+        loadCachedSpend()
+        var key = configuredKey
+        if (key.indexOf("sk-or-") !== 0)
+            return
+        if (fetchBusy)
+            return
+        var age = dataAgeSeconds()
+        if (age <= detailRefreshStaleSeconds)
+            return
+        if (!isFinite(age)) {
+            refresh()
+            return
+        }
+        fetchBusy = true
+        var cachedJson = readCachedSpendJson()
+        SpendBackend.fetchRecentSpend(key, cachedJson, function(err, json) {
+            Qt.callLater(function() {
+                root.fetchBusy = false
+                if (err) {
+                    root.setError(String(err))
+                    root.loadCachedSpend()
+                    return
+                }
+                root.applyFetchedJson(json)
             })
         })
     }
@@ -128,10 +174,8 @@ PlasmoidItem {
     }
 
     onExpandedChanged: function(nowExpanded) {
-        if (nowExpanded) {
-            loadCachedSpend()
-            refresh()
-        }
+        if (nowExpanded)
+            refreshForDetails()
     }
 
     Component.onCompleted: startupTimer.start()
