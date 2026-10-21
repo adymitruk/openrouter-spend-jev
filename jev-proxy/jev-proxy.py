@@ -16,6 +16,7 @@ import json
 import time
 import hashlib
 import logging
+from contextlib import asynccontextmanager
 from typing import Dict, Any, Tuple
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -84,9 +85,30 @@ def _cost(model: str, pin: int, pout: int) -> float:
     p_in, p_out = PRICES.get(model, (0.0, 0.0))
     return pin * p_in + pout * p_out
 
-app = FastAPI(title="Hermes Jev Custom Router")
 http_client: httpx.AsyncClient = None
 _pinned: Dict[str, Tuple[str, float]] = {}   # conv_key -> (lane, expiry_ts)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Own the shared upstream client for the life of the process.
+
+    A lifespan handler replaces the deprecated @app.on_event startup/shutdown
+    hooks, which FastAPI warned about on every boot.
+    """
+    global http_client
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0),
+        limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
+    )
+    try:
+        yield
+    finally:
+        if http_client:
+            await http_client.aclose()
+
+
+app = FastAPI(title="Hermes Jev Custom Router", lifespan=lifespan)
 
 
 def _clean_pinned(now: float) -> None:
@@ -101,21 +123,6 @@ def _record(model, lane, conf, jev_ms, pin, pout):
     _balance[0] += c
     log.info("COST [%s] %s in=%d out=%d $%.6f (run: $%.5f, tok %d/%d, turns %d)",
              lane, model, pin, pout, c, _balance[0], _ntokens[0], _ntokens[1], _nturns[0])
-
-
-@app.on_event("startup")
-async def startup_event():
-    global http_client
-    http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0),
-        limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
-    )
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    if http_client:
-        await http_client.aclose()
 
 
 def extract_compact_state(messages: list, has_tools: bool) -> str:
