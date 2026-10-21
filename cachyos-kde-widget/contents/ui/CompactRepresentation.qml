@@ -2,20 +2,20 @@
     Horizontal panel: wallet icon + pill text ($month ($24h, $1h)).
     Vertical panel: icon only (panel thickness is too narrow for three figures).
 */
-pragma ComponentBehavior: Bound
 
-import QtQuick
-import QtQuick.Layouts
+import QtQuick 2.15
+import QtQuick.Layouts 1.15
 
-import org.kde.plasma.core as PlasmaCore
-import org.kde.plasma.plasmoid
-import org.kde.plasma.components as PlasmaComponents
-import org.kde.kirigami as Kirigami
+import org.kde.plasma.core 2.0 as PlasmaCore
+import org.kde.plasma.plasmoid 2.0
+import org.kde.plasma.components 3.0 as PlasmaComponents
+import org.kde.kirigami 2.20 as Kirigami
 
 Item {
     id: root
 
-    required property PlasmoidItem plasmoidItem
+    // The applet root item (a plain Item on Plasma 5, a PlasmoidItem on Plasma 6).
+    property var plasmoidItem
 
     readonly property bool horizontalPanel: Plasmoid.formFactor === PlasmaCore.Types.Horizontal
     readonly property int sidePadding: Kirigami.Units.smallSpacing * 2
@@ -57,11 +57,11 @@ Item {
             visible: root.horizontalPanel
             Layout.alignment: Qt.AlignVCenter
             text: {
-                if (plasmoidItem.lastError !== "")
-                    return plasmoidItem.lastError
-                return plasmoidItem.pillText
+                if (root.plasmoidItem && root.plasmoidItem.lastError !== "")
+                    return root.plasmoidItem.lastError
+                return root.plasmoidItem ? root.plasmoidItem.pillText : ""
             }
-            font.bold: plasmoidItem.spend.monthTotal > 0
+            font.bold: root.plasmoidItem ? root.plasmoidItem.spend.monthTotal > 0 : false
             elide: Text.ElideNone
         }
     }
@@ -81,7 +81,7 @@ Item {
     }
 
     Accessible.name: Plasmoid.title
-    Accessible.description: plasmoidItem.toolTipSubText ?? ""
+    Accessible.description: Plasmoid.toolTipSubText ? Plasmoid.toolTipSubText : ""
     Accessible.role: Accessible.Button
 
     MouseArea {
@@ -89,12 +89,11 @@ Item {
         anchors.fill: parent
         hoverEnabled: true
         property bool wasExpanded: false
-        onPressed: wasExpanded = plasmoidItem.expanded
+        onPressed: wasExpanded = Plasmoid.expanded
         onClicked: mouse => {
-            if (mouse.button === Qt.MiddleButton)
-                Plasmoid.secondaryActivated()
-            else
-                plasmoidItem.expanded = !wasExpanded
+            // Plasma 5 has no Plasmoid.secondaryActivated(); middle click just
+            // activates like a left click instead.
+            Plasmoid.expanded = !wasExpanded
         }
     }
 }

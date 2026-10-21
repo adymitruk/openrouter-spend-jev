@@ -1,12 +1,13 @@
-import QtQuick
-import QtQuick.LocalStorage as SQL
-import org.kde.plasma.plasmoid
-import org.kde.plasma.core as PlasmaCore
-import org.kde.kirigami as Kirigami
+import QtQuick 2.15
+import QtQuick.Layouts 1.15
+import Qt.labs.settings 1.1
+import org.kde.plasma.plasmoid 2.0
+import org.kde.plasma.core 2.0 as PlasmaCore
+import org.kde.kirigami 2.20 as Kirigami
 import "Model.js" as Model
 import "../code/SpendBackend.js" as SpendBackend
 
-PlasmoidItem {
+Item {
     id: root
 
     property var spend: Model.emptySpend()
@@ -35,31 +36,47 @@ PlasmoidItem {
         return Kirigami.Units.gridUnit * 48
     }
 
-    preferredRepresentation: Plasmoid.formFactor === PlasmaCore.Types.Planar ? fullRepresentation : null
-
     readonly property url panelIcon: Qt.resolvedUrl("../icons/openrouter-spend.svg")
 
-    Plasmoid.icon: panelIcon
+    // --- Plasma 5 / KF5 wiring -------------------------------------------------
+    // On Plasma 6 these were root properties of a PlasmoidItem. In Plasma 5 the
+    // applet root is a plain Item and everything hangs off the attached Plasmoid
+    // object (same idiom as org.kde.plasma.systemmonitor).
+    Plasmoid.preferredRepresentation: Plasmoid.formFactor === PlasmaCore.Types.Planar ? Plasmoid.fullRepresentation : null
+
+    Plasmoid.icon: "openrouter-spend"
     Plasmoid.title: "OpenRouter Spend"
-    badgeText: ""
 
-    toolTipMainText: lastError !== "" ? lastError : pillText
-    toolTipSubText: hasKey ? (Model.monthLabel(spend.month) || "OpenRouter") : "Management key not set — right-click to configure"
+    Plasmoid.toolTipMainText: lastError !== "" ? lastError : pillText
+    Plasmoid.toolTipSubText: hasKey ? (Model.monthLabel(spend.month) || "OpenRouter") : "Management key not set — right-click to configure"
 
-    function spendDatabase() {
-        return SQL.LocalStorage.openDatabaseSync(
-                    "OpenRouterSpendWidget", "1.0", "OpenRouter spend cache", 1000000)
+    Plasmoid.compactRepresentation: CompactRepresentation {
+        plasmoidItem: root
+    }
+
+    Plasmoid.fullRepresentation: FullRepresentation {
+        spend: root.spend
+        updatedNow: root.updatedNow
+        fetchBusy: root.fetchBusy
+        hasKey: root.hasKey
+        lastError: root.lastError
+        popupWidth: root.popupWidth
+        popupHeight: root.popupHeight
+        onConfigureRequested: root.openConfig()
+    }
+
+    // --- cache -------------------------------------------------------------
+    // QtQuick.LocalStorage is an optional, separately-packaged module on most
+    // KF5 distros (qml-module-qtquick-localstorage). Qt.labs.settings ships with
+    // qtdeclarative and is always present, so the cache lives there instead.
+    Settings {
+        id: cache
+        category: "OpenRouterSpend"
+        property string cachedJson: ""
     }
 
     function loadCachedSpend() {
-        var json = ""
-        var database = spendDatabase()
-        database.transaction(function(tx) {
-            tx.executeSql("CREATE TABLE IF NOT EXISTS cache (id INTEGER PRIMARY KEY, json TEXT)")
-            var rs = tx.executeSql("SELECT json FROM cache WHERE id = 1")
-            if (rs.rows.length > 0)
-                json = rs.rows.item(0).json
-        })
+        var json = cache.cachedJson
         if (!json)
             return
         var parsed = Model.parseSpend(json)
@@ -68,11 +85,7 @@ PlasmoidItem {
     }
 
     function saveCachedSpend(json) {
-        var database = spendDatabase()
-        database.transaction(function(tx) {
-            tx.executeSql("CREATE TABLE IF NOT EXISTS cache (id INTEGER PRIMARY KEY, json TEXT)")
-            tx.executeSql("INSERT OR REPLACE INTO cache (id, json) VALUES (1, ?)", [json])
-        })
+        cache.cachedJson = json
     }
 
     function setError(message) {
@@ -122,16 +135,11 @@ PlasmoidItem {
     }
 
     function openConfig() {
-        var action = Plasmoid.internalAction("configure")
+        // Plasma 5 has no internalAction(); the applet's own configure action is
+        // reached through Plasmoid.action() (as paneltoolbox does).
+        var action = Plasmoid.action("configure")
         if (action)
             action.trigger()
-    }
-
-    onExpandedChanged: function(nowExpanded) {
-        if (nowExpanded) {
-            loadCachedSpend()
-            refresh()
-        }
     }
 
     Component.onCompleted: startupTimer.start()
@@ -166,6 +174,12 @@ PlasmoidItem {
             if (root.ready)
                 configRefreshDebounce.restart()
         }
+        function onExpandedChanged() {
+            if (root.ready && plasmoid.expanded) {
+                root.loadCachedSpend()
+                root.refresh()
+            }
+        }
     }
 
     Timer {
@@ -180,20 +194,5 @@ PlasmoidItem {
         repeat: true
         running: true
         onTriggered: root.updatedNow = Date.now()
-    }
-
-    compactRepresentation: CompactRepresentation {
-        plasmoidItem: root
-    }
-
-    fullRepresentation: FullRepresentation {
-        spend: root.spend
-        updatedNow: root.updatedNow
-        fetchBusy: root.fetchBusy
-        hasKey: root.hasKey
-        lastError: root.lastError
-        popupWidth: root.popupWidth
-        popupHeight: root.popupHeight
-        onConfigureRequested: root.openConfig()
     }
 }

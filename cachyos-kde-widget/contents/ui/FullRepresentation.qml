@@ -1,9 +1,9 @@
-import QtQuick
-import QtQuick.Layouts
-import QtQuick.Controls as QQC2
-import org.kde.plasma.components as PlasmaComponents
-import org.kde.plasma.extras as PlasmaExtras
-import org.kde.kirigami as Kirigami
+import QtQuick 2.15
+import QtQuick.Layouts 1.15
+import QtQuick.Controls 2.15 as QQC2
+import org.kde.plasma.components 3.0 as PlasmaComponents
+import org.kde.plasma.extras 2.0 as PlasmaExtras
+import org.kde.kirigami 2.20 as Kirigami
 import "Model.js" as Model
 
 PlasmaExtras.Representation {
@@ -22,8 +22,13 @@ PlasmaExtras.Representation {
 
     property bool showHelp: false
 
-    readonly property color secondary: Qt.alpha(Kirigami.Theme.textColor, 0.65)
-    readonly property color hairline: Qt.alpha(Kirigami.Theme.textColor, 0.14)
+    // Qt.alpha() was added in Qt 6; compose the same colour with Qt.rgba().
+    function withAlpha(source, a) {
+        return Qt.rgba(source.r, source.g, source.b, a)
+    }
+
+    readonly property color secondary: withAlpha(Kirigami.Theme.textColor, 0.65)
+    readonly property color hairline: withAlpha(Kirigami.Theme.textColor, 0.14)
     readonly property var series: spend && spend.series ? spend.series : []
     readonly property var hourBars: spend && spend.lastHour ? spend.lastHour : []
     readonly property var modelRows: spend && spend.models ? spend.models : []
@@ -89,8 +94,8 @@ PlasmaExtras.Representation {
         readonly property int axisWidth: Math.round(Kirigami.Units.gridUnit * 3)
         readonly property real scale: maxTotal > 0 ? maxTotal : 1
         readonly property real plotWidth: plot.width
-        readonly property color axisColor: Qt.alpha(Kirigami.Theme.textColor, 0.6)
-        readonly property color gridColor: Qt.alpha(Kirigami.Theme.textColor, 0.14)
+        readonly property color axisColor: panel.withAlpha(Kirigami.Theme.textColor, 0.6)
+        readonly property color gridColor: panel.withAlpha(Kirigami.Theme.textColor, 0.14)
         default property alias barContent: plot.data
 
         Rectangle {

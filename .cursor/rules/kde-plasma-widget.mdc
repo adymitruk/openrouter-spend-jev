@@ -1,19 +1,29 @@
 ---
-description: KDE Plasma 6 plasmoid work — consult official docs first
+description: KDE Plasma 5 plasmoid work — consult official docs first
 globs: cachyos-kde-widget/**/*
 alwaysApply: false
 ---
 
 # KDE Plasma widget development
 
+This branch targets **Plasma 5.27 / KF5 / Qt 5.15**. The master version of this
+package targets Plasma 6 and is not source compatible with it.
+
 When changing `cachyos-kde-widget/`, read the relevant **KDE Developer** docs before implementing or guessing APIs:
 
-- [Setup](https://develop.kde.org/docs/plasma/widget/setup/) — `PlasmoidItem`, compact/full representation, popup sizing (`Layout.preferredWidth` / `Layout.preferredHeight` on `fullRepresentation`)
-- [Configuration](https://develop.kde.org/docs/plasma/widget/configuration/) — `main.xml`, `config.qml`, `KCM.SimpleKCM`, `plasmoid.configuration.*`
-- [Porting to KF6](https://develop.kde.org/docs/plasma/widget/porting_kf6/) — metadata (`X-Plasma-API-Minimum-Version`, no `X-Plasma-MainScript`)
-- [Properties](https://develop.kde.org/docs/plasma/widget/properties/) — `Plasmoid` vs `PlasmoidItem` vs `plasmoid`
+- [Setup](https://develop.kde.org/docs/plasma/widget/setup/) — root `Item` plus `Plasmoid.compactRepresentation` / `Plasmoid.fullRepresentation`, popup sizing on the full representation
+- [Configuration](https://develop.kde.org/docs/plasma/widget/configuration/) — `main.xml`, `config.qml`, `plasmoid.configuration.*`; the page root is a bare `Kirigami.FormLayout`
+- [Porting to KF6](https://develop.kde.org/docs/plasma/widget/porting_kf6/) — read for the *differences*; KF5 metadata wants `X-Plasma-API: declarativeappletscript` and `X-Plasma-MainScript`, and must not request `X-Plasma-API-Minimum-Version: 6.0`
+- [Properties](https://develop.kde.org/docs/plasma/widget/properties/) — the attached `Plasmoid` object is where everything lives on KF5
 - [Examples](https://develop.kde.org/docs/plasma/widget/examples/)
 
-For HTTP from QML, prefer **XMLHttpRequest** in a `.pragma library` JS file ([Qt XMLHttpRequest](https://doc.qt.io/qt-6/qml-qtqml-xmlhttprequest.html), [Plasmoid tutorial — getting data](https://blog.davidedmundson.co.uk/blog/plasmoid-tutorial-2-getting-data/)). Avoid Python helpers in this package.
+KF5 API notes (verified against plasma-framework 5.115): there is no `PlasmoidItem`,
+no `Plasmoid.badgeText`, no `Plasmoid.internalAction()`, no
+`Plasmoid.secondaryActivated()` and no `Qt.alpha()`. Use a plain `Item` root,
+`Plasmoid.action("configure").trigger()` for the settings dialog, and `Qt.rgba()` to
+add alpha to a colour. Compare against a stock plasmoid under
+`/usr/share/plasma/plasmoids/` when in doubt — they are the authoritative KF5 idiom.
 
-Prefer `systemctl --user restart plasma-plasmashell.service` over `plasmashell --replace` when testing installs.
+For HTTP from QML, prefer **XMLHttpRequest** in a `.pragma library` JS file ([Qt XMLHttpRequest](https://doc.qt.io/qt-5/qml-qtqml-xmlhttprequest.html), [Plasmoid tutorial — getting data](https://blog.davidedmundson.co.uk/blog/plasmoid-tutorial-2-getting-data/)). Avoid Python helpers in this package.
+
+Prefer `systemctl --user restart plasma-plasmashell.service` over `plasmashell --replace` when testing installs. Install/update with `kpackagetool5` (KF6's `kpackagetool6` is not present on Plasma 5).

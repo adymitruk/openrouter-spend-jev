@@ -1,25 +1,35 @@
-OpenRouter Spend for KDE Plasma. Same figures as the Omarchy bar widget: a panel icon with badge, and a breakdown popup when you click it.
+OpenRouter Spend for KDE Plasma 5 (KF5 / Qt 5.15). Same figures as the Omarchy bar widget: a panel pill, and a breakdown popup when you click it.
+
+This branch (`plasma5-qt5-port`) targets Plasma 5.27 / KF5 / Qt 5.15. The `master` version of this package targets Plasma 6 (root `PlasmoidItem`, versionless KF6 imports) and will not load on Plasma 5: on a KF5 shell the applet is never even instantiated, so nothing is drawn. The two QML APIs are not source compatible, so the package is single-target.
 
 KDE widget docs (check these when changing QML or metadata): https://develop.kde.org/docs/plasma/widget/
 
 Panel: wallet icon plus a pill with `$<month> ($<24h>, $<1h>)`. Click for the full breakdown popup.
 
-Panel: month total, last 30 days stacked by model, last hour in 5-minute buckets, spend per model, spend per day. Days cut off at local midnight.
+Popup: month total, last 30 days stacked by model, last hour in 5-minute buckets, spend per model, spend per day. Days cut off at local midnight.
 
-Management key: widget settings only (`sk-or-...` placeholder in docs — never commit real keys). Cache: Qt Quick LocalStorage under your Plasma profile (not in this repo).
+Management key: widget settings only (`sk-or-...` placeholder in docs — never commit real keys). Cache: `Qt.labs.settings`, group `OpenRouterSpend` (QtQuick.LocalStorage is a separately packaged module on KF5 distros, so it is not used here).
+
+What differs from the Plasma 6 version:
+
+- applet root is a plain `Item`; representations hang off `Plasmoid.compactRepresentation` / `Plasmoid.fullRepresentation`
+- metadata.json carries the KF5 keys `X-Plasma-API: declarativeappletscript` and `X-Plasma-MainScript: ui/main.qml`, and does **not** set `X-Plasma-API-Minimum-Version: 6.0` (KF5 refuses to load an applet that demands a newer API)
+- config page root is a bare `Kirigami.FormLayout`, not `KCM.SimpleKCM`
+- `Plasmoid.action("configure").trigger()` opens the settings dialog (`internalAction` does not exist in KF5)
+- not available in KF5 and therefore removed: `PlasmoidItem`, `badgeText`, `Plasmoid.secondaryActivated()`, `Qt.alpha()`
 
 Install from the repo root:
 
 ```
-kpackagetool6 -t Plasma/Applet -i cachyos-kde-widget
+kpackagetool5 -t Plasma/Applet -i cachyos-kde-widget
 ```
 
-Add **OpenRouter Spend** to a panel. Right-click the pill → Configure, and paste an OpenRouter management key (`sk-or-...`). The gear in the panel opens the same dialog.
+Add **OpenRouter Spend** to a panel. Right-click the pill → Configure, and paste an OpenRouter management key (`sk-or-...`). The gear in the popup opens the same dialog.
 
 After later changes:
 
 ```
-kpackagetool6 -t Plasma/Applet -u cachyos-kde-widget
+kpackagetool5 -t Plasma/Applet -u cachyos-kde-widget
 ```
 
 If the widget does not appear in the picker, restart the shell:

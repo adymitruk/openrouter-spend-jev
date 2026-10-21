@@ -1,5 +1,4 @@
 {
-    "KPackageStructure": "Plasma/Applet",
     "KPlugin": {
         "Authors": [
             {
@@ -11,7 +10,11 @@
         "Icon": "openrouter-spend",
         "Id": "com.adam.openrouterspend",
         "Name": "OpenRouter Spend",
+        "ServiceTypes": [
+            "Plasma/Applet"
+        ],
         "Version": "1.0.0"
     },
-    "X-Plasma-API-Minimum-Version": "6.0"
+    "X-Plasma-API": "declarativeappletscript",
+    "X-Plasma-MainScript": "ui/main.qml"
 }
