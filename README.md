@@ -31,4 +31,5 @@ with per-day and per-model breakdown, 30-day stacked chart, and last-hour bars.
 ### jev-proxy
 
 Local OpenAI-compatible proxy that routes between model tiers using
-Jev classification on OpenRouter. Runs as a user systemd service.
+Jev classification on OpenRouter. A conversation only steps up
+(cheap → fast_mid → smart_pro) and never downgrades. Runs as a user systemd service.

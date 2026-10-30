@@ -4,11 +4,13 @@ Local OpenAI-compatible Jev Router Proxy for Hermes Agent.
 Routes between GLM 5.3 Flash (cheap), DeepSeek V4 Flash (fast_mid),
 and DeepSeek V4 Pro (smart_pro) using typesafe/jev-1.13 on OpenRouter.
 
-Reference design merged with two hard-won fixes:
+Reference design merged with hard-won fixes:
   1. reasoning_effort:"none" -> "low" for the cheap lane (glm-flash mandates
      reasoning and rejects "none" with a 400).
   2. tool-loop lane pinning (reuse a lane across assistant<->tool turns so the
      conversation context is never routed to a different model mid-turn).
+  3. sticky tiers: a Hermes conversation only steps up cheap -> fast_mid ->
+     smart_pro. A later turn never downgrades, so the prompt cache stays hot.
 NOTE: "typesafe/jev-latest" does NOT exist on OpenRouter — use typesafe/jev-1.13.
 """
 import os
@@ -68,6 +70,10 @@ CONFIDENCE_THRESHOLD = float(os.getenv("JEV_MIN_CONFIDENCE", "0.72"))
 JEV_TIMEOUT_SEC = float(os.getenv("JEV_TIMEOUT_SEC", "1.2"))
 PIN_TTL_SEC = 300.0  # how long to pin a lane during a tool loop
 
+# 0 = cheap, 1 = fast_mid, 2 = smart_pro. Unknown Jev output defaults to fast_mid.
+TIER_LEVELS = {"cheap": 0, "fast_mid": 1, "smart_pro": 2}
+LANE_BY_TIER = {level: lane for lane, level in TIER_LEVELS.items()}
+
 # Per-token pricing (USD) for cost tracking, keyed by OpenRouter model slug.
 PRICES = {
     "z-ai/glm-5.3-flash": (0.040e-6, 0.500e-6),
@@ -86,7 +92,8 @@ def _cost(model: str, pin: int, pout: int) -> float:
 
 app = FastAPI(title="Hermes Jev Custom Router")
 http_client: httpx.AsyncClient = None
-_pinned: Dict[str, Tuple[str, float]] = {}   # conv_key -> (lane, expiry_ts)
+_pinned: Dict[str, Tuple[str, float]] = {}   # conversation_id -> (lane, expiry_ts)
+_session_tiers: Dict[str, int] = {}          # conversation_id -> highest tier used
 
 
 def _clean_pinned(now: float) -> None:
@@ -207,6 +214,51 @@ async def classify_with_jev(state_text: str, api_key: str) -> Tuple[str, float, 
         return "fast_mid", 0.0, elapsed_ms
 
 
+def _raise_session_tier(conversation_id: str, jev_lane: str) -> str:
+    """Never downgrade. If this conversation is already on Pro, stay on Pro."""
+    previous = _session_tiers.get(conversation_id, 0)
+    jev_tier = TIER_LEVELS.get(jev_lane, 1)
+    final = max(previous, jev_tier)
+    _session_tiers[conversation_id] = final
+    lane = LANE_BY_TIER[final]
+    if lane != jev_lane:
+        log.info(
+            "sticky: conv %s stays %s (tier %d); jev wanted %s",
+            conversation_id[:16], lane, final, jev_lane,
+        )
+    return lane
+
+
+def resolve_conversation_id(request: Request, body: dict, messages: list) -> str:
+    """Hermes conversation id, else a hash of the opening user message."""
+    for header in ("x-hermes-session-id", "x-session-id", "x-conversation-id"):
+        value = (request.headers.get(header) or "").strip()
+        if value:
+            return value
+    sources = [body]
+    extra = body.get("extra_body")
+    if isinstance(extra, dict):
+        sources.append(extra)
+    for source in sources:
+        for key in ("session_id", "conversation_id"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return conv_key(messages)
+
+
+def _drop_routing_ids(body: dict) -> None:
+    """Don't forward the conversation key; it is only the sticky-tier index."""
+    body.pop("session_id", None)
+    body.pop("conversation_id", None)
+    extra = body.get("extra_body")
+    if isinstance(extra, dict):
+        extra.pop("session_id", None)
+        extra.pop("conversation_id", None)
+        if not extra:
+            body.pop("extra_body", None)
+
+
 def conv_key(messages: list) -> str:
     """Stable key for one turn: hash of the first user message."""
     for msg in messages:
@@ -222,9 +274,18 @@ def is_tool_continuation(messages: list) -> bool:
     return bool(messages) and messages[-1].get("role") == "tool"
 
 
-async def route_turn(messages: list, has_tools: bool, api_key: str) -> Tuple[str, str, float, float]:
-    """Returns (lane_key, conv_key, confidence, latency_ms). Pins mid-loop."""
-    key = conv_key(messages)
+async def route_turn(
+    messages: list,
+    has_tools: bool,
+    api_key: str,
+    conversation_id: str | None = None,
+) -> Tuple[str, str, float, float]:
+    """Returns (lane_key, conversation_id, confidence, latency_ms).
+
+    Tool continuations reuse the pinned lane. Every fresh classification can
+    only raise the conversation's tier, never lower it.
+    """
+    key = (conversation_id or "").strip() or conv_key(messages)
     now = time.time()
     _clean_pinned(now)
     if is_tool_continuation(messages):
@@ -232,7 +293,8 @@ async def route_turn(messages: list, has_tools: bool, api_key: str) -> Tuple[str
         if pinned and pinned[1] > now:
             return pinned[0], key, 1.0, 0.0   # reuse lane, no Jev call
     compact = extract_compact_state(messages, has_tools)
-    lane, conf, ms = await classify_with_jev(compact, api_key)
+    jev_lane, conf, ms = await classify_with_jev(compact, api_key)
+    lane = _raise_session_tier(key, jev_lane)
     _pinned[key] = (lane, now + PIN_TTL_SEC)
     return lane, key, conf, ms
 
@@ -261,7 +323,11 @@ async def proxy_chat_completions(request: Request):
 
     # Only run Jev classification if Hermes asks for the router model
     if requested_model in ("jev", "jev-custom", "auto", "typesafe/jev-router"):
-        lane_key, _, conf, jev_ms = await route_turn(messages, has_tools, api_key)
+        conversation_id = resolve_conversation_id(request, body, messages)
+        lane_key, _, conf, jev_ms = await route_turn(
+            messages, has_tools, api_key, conversation_id,
+        )
+        _drop_routing_ids(body)
         lane_cfg = LANES[lane_key]
         target_model = lane_cfg["model"]
         body["model"] = target_model
