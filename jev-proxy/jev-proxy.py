@@ -57,7 +57,7 @@ LANES: Dict[str, Dict[str, str]] = {
         "provider_sort": "price",       # Minimize cost for routine/background turns
     },
     "fast_mid": {
-        "model": os.getenv("JEV_LANE_MID", "deepseek/deepseek-v4-flash"),
+        "model": os.getenv("JEV_LANE_MID", "deepseek/deepseek-v4.1-flash"),
         "provider_sort": "throughput",  # daily driver
     },
     "smart_pro": {
@@ -66,7 +66,7 @@ LANES: Dict[str, Dict[str, str]] = {
     },
 }
 
-CONFIDENCE_THRESHOLD = float(os.getenv("JEV_MIN_CONFIDENCE", "0.72"))
+CONFIDENCE_THRESHOLD = float(os.getenv("JEV_MIN_CONFIDENCE", "0.85"))
 JEV_TIMEOUT_SEC = float(os.getenv("JEV_TIMEOUT_SEC", "1.2"))
 PIN_TTL_SEC = 300.0  # how long to pin a lane during a tool loop
 
@@ -77,7 +77,7 @@ LANE_BY_TIER = {level: lane for lane, level in TIER_LEVELS.items()}
 # Per-token pricing (USD) for cost tracking, keyed by OpenRouter model slug.
 PRICES = {
     "z-ai/glm-5.3-flash": (0.040e-6, 0.500e-6),
-    "deepseek/deepseek-v4-flash": (0.047e-6, 0.094e-6),
+    "deepseek/deepseek-v4.1-flash": (0.300e-6, 1.200e-6),  # approx, most-host price
     "deepseek/deepseek-v4-pro": (0.348e-6, 0.696e-6),
 }
 
