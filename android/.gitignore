@@ -6,5 +6,11 @@ OpenRouterSpend/gradlew
 OpenRouterSpend/gradlew.bat
 OpenRouterSpend/orspend-debug.keystore
 
+# Signing material — never commit keys or their credentials
+*.jks
+*.keystore
+*.p12
+keystore.properties
+
 # Ignore Docker builder context
 Dockerfile.builder
