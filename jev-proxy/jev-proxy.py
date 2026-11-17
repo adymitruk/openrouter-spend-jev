@@ -2,23 +2,31 @@
 """
 Local OpenAI-compatible Jev Router Proxy for Hermes Agent.
 Routes between GLM 5.3 Flash (cheap), DeepSeek V4 Flash (fast_mid),
-and DeepSeek V4 Pro (smart_pro) using typesafe/jev-1.13 on OpenRouter.
+and DeepSeek V4 Pro (smart_pro) using Jev on OpenRouter.
 
-Reference design merged with hard-won fixes:
+Reference design merged with two hard-won fixes and the sticky-tier work:
   1. reasoning_effort:"none" -> "low" for the cheap lane (glm-flash mandates
      reasoning and rejects "none" with a 400).
   2. tool-loop lane pinning (reuse a lane across assistant<->tool turns so the
      conversation context is never routed to a different model mid-turn).
   3. sticky tiers: a Hermes conversation only steps up cheap -> fast_mid ->
      smart_pro. A later turn never downgrades, so the prompt cache stays hot.
-NOTE: "typesafe/jev-latest" does NOT exist on OpenRouter — use typesafe/jev-1.13.
+
+Auto-upgrades the Jev model: on startup, queries ~typesafe/jev-latest
+via the decisions endpoint and bumps the config file if a newer version
+is available; a failed decision or a non-2xx upstream response triggers
+one upgrade + retry before falling back.
+NOTE: "typesafe/jev-latest" does NOT work as a chat model on OpenRouter —
+resolve it via /alpha/decisions, then use the typesafe/jev-X.Y slug.
 """
 import os
+import re
 import json
 import time
 import hashlib
 import logging
 from typing import Dict, Any, Tuple
+from pathlib import Path
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -29,6 +37,100 @@ log = logging.getLogger("jev-router")
 OPENROUTER_BASE = "https://openrouter.ai/api"
 DECISIONS_URL = f"{OPENROUTER_BASE}/alpha/decisions"
 CHAT_URL = f"{OPENROUTER_BASE}/v1/chat/completions"
+JEV_LATEST_ALIAS = "~typesafe/jev-latest"
+
+# Config file: stores the current Jev model slug (e.g. "typesafe/jev-1.14")
+_CONFIG_PATH = Path(os.getenv("JEV_PROXY_CONFIG", str(Path.home() / ".config" / "hermes" / "jev-proxy.json")))
+_DEFAULT_JEV = "typesafe/jev-1.14"
+
+
+def _read_config() -> dict:
+    """Read config file, creating with defaults if missing."""
+    if _CONFIG_PATH.exists():
+        try:
+            return json.loads(_CONFIG_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            log.warning("Corrupt config, re-creating with defaults")
+    cfg = {"jev_model": _DEFAULT_JEV, "updated_at": None}
+    _write_config(cfg)
+    return cfg
+
+
+def _write_config(cfg: dict) -> None:
+    """Atomically write config."""
+    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _CONFIG_PATH.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.replace(_CONFIG_PATH)
+
+
+def _parse_jev_version(model_id: str) -> tuple:
+    """Extract (major, minor) version tuple from a Jev model ID like
+    'typesafe/jev-1.14-20261014' or 'typesafe/jev-1.14'.
+    Returns (0, 0) on failure."""
+    m = re.search(r"jev-(\d+)\.(\d+)", model_id)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    return (0, 0)
+
+
+async def _check_jev_upgrade(http_client: httpx.AsyncClient, api_key: str) -> None:
+    """Query ~typesafe/jev-latest via decisions endpoint; upgrade config if newer."""
+    if not api_key:
+        log.warning("No API key, skipping Jev upgrade check")
+        return
+    bearer = api_key if api_key.startswith("Bearer ") else f"Bearer {api_key}"
+    payload = {
+        "model": JEV_LATEST_ALIAS,
+        "state": "upgrade check",
+        "questions": {
+            "_ping": {
+                "type": "choice",
+                "instructions": "Pick option a",
+                "criteria": {"a": "ack", "b": "nack"}
+            }
+        },
+    }
+    try:
+        resp = await http_client.post(
+            DECISIONS_URL,
+            headers={"Authorization": bearer, "Content-Type": "application/json"},
+            json=payload,
+            timeout=5.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        resolved = data.get("model", "")
+        if not resolved:
+            log.warning("Upgrade check: empty resolved model from decisions endpoint")
+            return
+
+        cfg = _read_config()
+        current = cfg.get("jev_model", _DEFAULT_JEV)
+        resolved_ver = _parse_jev_version(resolved)
+        current_ver = _parse_jev_version(current)
+
+        # Build the slug we'd use from the resolved name: typesafe/jev-X.Y
+        m = re.search(r"(typesafe/jev-\d+\.\d+)", resolved)
+        if not m:
+            log.info(f"Upgrade check: could not extract slug from '{resolved}', skipping")
+            return
+        resolved_slug = m.group(1)
+
+        if resolved_ver > current_ver:
+            cfg["jev_model"] = resolved_slug
+            cfg["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+            _write_config(cfg)
+            log.info(f"Upgraded Jev model: {current} -> {resolved_slug} (resolved {resolved})")
+        elif resolved_ver < current_ver:
+            # Shouldn't normally happen; log for awareness
+            log.info(f"Upgrade check: config has {current} but latest resolves to {resolved_slug} "
+                     f"(resolved {resolved}) — possibly the alias is stale?")
+        else:
+            log.info(f"Upgrade check: {current} is current (resolved {resolved})")
+    except Exception as exc:
+        log.warning(f"Upgrade check failed ({exc}), keeping current config")
+
 
 # The REAL OpenRouter key used for upstream calls. Sourced from env or
 # ~/.hermes/.env. The incoming local Authorization is only an access gate
@@ -47,8 +149,11 @@ def _load_key() -> str:
 
 OPENROUTER_KEY = _load_key()
 
-# Real Jev model slug (validated on OpenRouter). Do NOT use typesafe/jev-latest.
-JEV_MODEL = os.getenv("JEV_MODEL", "typesafe/jev-1.13")
+# Read Jev model version from config file (env override supported for emergencies)
+_JEV_CFG = _read_config()
+JEV_MODEL = os.getenv("JEV_MODEL", _JEV_CFG.get("jev_model", _DEFAULT_JEV))
+log.info(f"Using Jev model: {JEV_MODEL} (config: {_JEV_CFG.get('jev_model', '(default)')}, "
+         f"env: {'set' if os.getenv('JEV_MODEL') else 'unset'})")
 
 # Customize your 3 model lanes here
 LANES: Dict[str, Dict[str, str]] = {
@@ -85,7 +190,6 @@ _balance = [0.0]  # cumulative forwarded-token cost this process lifetime
 _ntokens = [0, 0]  # [cumulative_prompt, cumulative_completion]
 _nturns = [0]      # count of routed chat calls
 
-
 def _cost(model: str, pin: int, pout: int) -> float:
     p_in, p_out = PRICES.get(model, (0.0, 0.0))
     return pin * p_in + pout * p_out
@@ -117,6 +221,13 @@ async def startup_event():
         timeout=httpx.Timeout(connect=5.0, read=300.0, write=30.0, pool=10.0),
         limits=httpx.Limits(max_keepalive_connections=20, max_connections=50),
     )
+    # Self-upgrade: check if a newer Jev model is available
+    await _check_jev_upgrade(http_client, OPENROUTER_KEY)
+    # Re-read config in case upgrade changed it; env override takes precedence
+    global JEV_MODEL
+    new_cfg = _read_config()
+    JEV_MODEL = os.getenv("JEV_MODEL", new_cfg.get("jev_model", _DEFAULT_JEV))
+    log.info(f"Jev model active: {JEV_MODEL}")
 
 
 @app.on_event("shutdown")
@@ -158,6 +269,7 @@ def extract_compact_state(messages: list, has_tools: bool) -> str:
 
 async def classify_with_jev(state_text: str, api_key: str) -> Tuple[str, float, float]:
     """Calls /alpha/decisions; returns (selected_lane_key, confidence, latency_ms)."""
+    global JEV_MODEL
     t0 = time.perf_counter()
     payload = {
         "model": JEV_MODEL,
@@ -210,7 +322,22 @@ async def classify_with_jev(state_text: str, api_key: str) -> Tuple[str, float, 
         return choice, confidence, elapsed_ms
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        log.warning(f"Jev decision fallback ({elapsed_ms:.0f}ms): {exc} -> 'fast_mid'")
+        log.warning(f"Jev decision failed ({elapsed_ms:.0f}ms): {exc}")
+
+        # Try upgrading the Jev version and retry classification once
+        try:
+            await _check_jev_upgrade(http_client, api_key)
+            new_cfg = _read_config()
+            new_model = os.getenv("JEV_MODEL", new_cfg.get("jev_model", _DEFAULT_JEV))
+            if new_model != JEV_MODEL:
+                log.info(f"Upgrading Jev on classification failure: {JEV_MODEL} -> {new_model}")
+                JEV_MODEL = new_model
+                # Retry classification once with the new Jev model
+                return await classify_with_jev(state_text, api_key)
+        except Exception as upgrade_err:
+            log.warning(f"Jev upgrade check on failure failed: {upgrade_err}")
+
+        log.warning(f"Jev decision fallback -> 'fast_mid'")
         return "fast_mid", 0.0, elapsed_ms
 
 
@@ -322,6 +449,7 @@ async def proxy_chat_completions(request: Request):
     has_tools = bool(body.get("tools"))
 
     # Only run Jev classification if Hermes asks for the router model
+    conversation_id: str | None = None
     if requested_model in ("jev", "jev-custom", "auto", "typesafe/jev-router"):
         conversation_id = resolve_conversation_id(request, body, messages)
         lane_key, _, conf, jev_ms = await route_turn(
@@ -397,14 +525,69 @@ async def proxy_chat_completions(request: Request):
             media_type=upstream_resp.headers.get("content-type", "text/event-stream"),
         )
     else:
-        upstream_resp = await http_client.post(CHAT_URL, headers=forward_headers, json=body)
-        data = upstream_resp.json()
-        if "usage" in data and data["usage"]:
-            u = data["usage"]
-            pin = u.get("prompt_tokens") or u.get("input_tokens") or 0
-            pout = u.get("completion_tokens") or u.get("output_tokens") or 0
-            _record(target_model, lane_key, conf, jev_ms, pin, pout)
-        return JSONResponse(content=data, status_code=upstream_resp.status_code)
+        global JEV_MODEL
+        first_error_data = None
+        first_error_status = None
+        for attempt in (0, 1):
+            if attempt == 1:
+                # Retry once with a possibly-upgraded Jev model: re-classify
+                if requested_model in ("jev", "jev-custom", "auto", "typesafe/jev-router"):
+                    # Re-classify with the (possibly upgraded) Jev model, keeping
+                    # the same conversation key so sticky tiers still apply.
+                    lane_key, _, conf, jev_ms = await route_turn(
+                        messages, has_tools, api_key, conversation_id,
+                    )
+                    lane_cfg = LANES[lane_key]
+                    target_model = lane_cfg["model"]
+                    body["model"] = target_model
+                    provider_cfg = body.get("provider", {})
+                    if "sort" not in provider_cfg:
+                        provider_cfg["sort"] = lane_cfg["provider_sort"]
+                    body["provider"] = provider_cfg
+                    if lane_key == "cheap":
+                        if isinstance(body.get("reasoning"), dict) and body["reasoning"].get("enabled") is False:
+                            del body["reasoning"]
+                        reff = body.get("reasoning_effort")
+                        if isinstance(reff, str) and reff.lower() in ("none", "off", "false"):
+                            log.info("cheap lane: upscale reasoning_effort %r -> low", reff)
+                            body["reasoning_effort"] = "low"
+                    log.info(f"Retry routed -> [{lane_key.upper()}] {target_model}")
+                    log.info(f"Retrying upstream with Jev model {JEV_MODEL}")
+
+            upstream_resp = await http_client.post(CHAT_URL, headers=forward_headers, json=body)
+            if upstream_resp.status_code < 400:
+                data = upstream_resp.json()
+                if "usage" in data and data["usage"]:
+                    u = data["usage"]
+                    pin = u.get("prompt_tokens") or u.get("input_tokens") or 0
+                    pout = u.get("completion_tokens") or u.get("output_tokens") or 0
+                    _record(target_model, lane_key, conf, jev_ms, pin, pout)
+                return JSONResponse(content=data, status_code=upstream_resp.status_code)
+
+            # Upstream failure: on first attempt, save the original error and
+            # try upgrading the Jev version before retrying once.
+            if first_error_data is None:
+                try:
+                    first_error_data = upstream_resp.json()
+                except Exception:
+                    first_error_data = {"error": {"message": f"Upstream returned HTTP {upstream_resp.status_code}"}}
+                first_error_status = upstream_resp.status_code
+                log.warning(f"Upstream failed (HTTP {first_error_status}), checking for newer Jev version")
+                try:
+                    await _check_jev_upgrade(http_client, OPENROUTER_KEY)
+                    new_cfg = _read_config()
+                    new_model = os.getenv("JEV_MODEL", new_cfg.get("jev_model", _DEFAULT_JEV))
+                    if new_model != JEV_MODEL:
+                        log.info(f"Jev upgraded on upstream failure: {JEV_MODEL} -> {new_model}")
+                        JEV_MODEL = new_model
+                        continue  # retry once
+                    log.info("No newer Jev version available; returning original error")
+                except Exception as upgrade_err:
+                    log.warning(f"Jev upgrade check on failure failed: {upgrade_err}")
+
+            # Retry also failed (or no upgrade) — pass the ORIGINAL error on
+            # so Hermes can use its fallback model.
+            return JSONResponse(content=first_error_data, status_code=first_error_status)
 
 
 @app.get("/v1/models")
