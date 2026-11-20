@@ -7,6 +7,11 @@ __pycache__/
 **/*.qmlc
 **/*.jsc
 
+# Panel / plasmoid artifacts and their config (the appletsrc holds API keys)
+appletsrc
+plasma-org.kde.plasma.desktop-appletsrc
+*.plasmoid
+
 # Secrets / env (repo uses widget config + user home for keys)
 .env
 .env.*

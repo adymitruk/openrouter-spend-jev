@@ -1,0 +1,44 @@
+DeepSeek Balance for KDE Plasma 6. Shows the remaining DeepSeek API credit next to the OpenRouter spend widget: a blue whale mark plus the current balance in the panel, and a breakdown popup.
+
+Data source: `GET https://api.deepseek.com/user/balance` with `Authorization: Bearer sk-...`.
+
+```json
+{
+  "is_available": true,
+  "balance_infos": [
+    {
+      "currency": "USD",
+      "total_balance": "14.50",
+      "granted_balance": "0.00",
+      "topped_up_balance": "14.50"
+    }
+  ]
+}
+```
+
+Panel: whale icon plus `$14.50`. The figure turns amber below the configured warn threshold and red with a short error code (`offline`, `key`, `401`, …) when a fetch fails; the last good balance stays cached.
+
+Popup: total balance, a topped-up vs granted split bar, one row per currency the API reports, the fetch age, and buttons to refresh and to open settings. Empty accounts show `UNAVAILABLE` rather than hiding the figure.
+
+Install from the repo root:
+
+```
+kpackagetool6 -t Plasma/Applet -i cachyos-kde-widget-deepseek
+```
+
+Add **DeepSeek Balance** to a panel. Right-click the figure → Configure, and paste a DeepSeek API key (`sk-...`). The key lives in this widget's settings only (`~/.config/plasma-org.kde.plasma.desktop-appletsrc`); the balance response is cached in Qt Quick LocalStorage under the Plasma profile, never in this repo.
+
+After later changes:
+
+```
+kpackagetool6 -t Plasma/Applet -u cachyos-kde-widget-deepseek
+systemctl --user restart plasma-plasmashell.service   # only needed if the shell does not pick the QML up
+```
+
+Tests for the parsing/formatting logic (no Plasma needed):
+
+```
+node testing/balance-model.test.js
+```
+
+The icon is a trace of the DeepSeek asset, coloured with the brand blue gradient; regenerate variants from `contents/icons/deepseek-balance.svg`.

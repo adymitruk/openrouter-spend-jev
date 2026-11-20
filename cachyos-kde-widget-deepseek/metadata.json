@@ -1,0 +1,17 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "adam"
+            }
+        ],
+        "Category": "Online Services",
+        "Description": "Shows the remaining DeepSeek API balance. Click for topped-up vs granted credit and the raw per-currency figures.",
+        "Icon": "deepseek-balance",
+        "Id": "com.adam.deepseekbalance",
+        "Name": "DeepSeek Balance",
+        "Version": "1.0.0"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0"
+}
